@@ -20,37 +20,39 @@ final class EventTapManager {
         case idle = "空闲"
         case pending = "等待判断"
         case gesturing = "手势中"
-        case clickReplayedAwaitingUp = "已补发右键，等待松开"
         case cleanupAwaitingUp = "保险重置，等待松开"
     }
 
     private let store: GestureStore
     private let recognizer = GestureRecognizer()
     private let overlay = GestureOverlayController()
+    private let stateQueue = DispatchQueue(label: "com.face.mygestures.eventtap.state", qos: .userInteractive)
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var tapThread: Thread?
+    private var tapRunLoop: CFRunLoop?
 
     private var state: InputState = .idle
     private var points: [CGPoint] = []
     private var displayPoints: [CGPoint] = []
     private var startPoint = CGPoint.zero
     private var lastPoint = CGPoint.zero
-    private var passThroughAfterTimeoutUntilRightMouseUp = false
-    private var decisionToken: UUID?
     private var gestureTimeoutToken: UUID?
     private var safetyToken: UUID?
     private var frontmostApplicationAtGestureStart: NSRunningApplication?
     private var lastFrontmostApplication: NSRunningApplication?
     private var activationObserver: NSObjectProtocol?
+    private var storeObserver: NSObjectProtocol?
+    private var preferences: AppPreferences
 
     private let movementThreshold: CGFloat = 10
-    private let startTimeout: TimeInterval = 0.15
     private let safetyTimeout: TimeInterval = 8
     private let syntheticMarker: Int64 = 0x4D474C524550
 
     init(store: GestureStore = .shared) {
         self.store = store
+        preferences = store.preferences
         lastFrontmostApplication = NSWorkspace.shared.frontmostApplication
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -58,17 +60,35 @@ final class EventTapManager {
             queue: .main
         ) { [weak self] notification in
             guard let self,
-                  self.state == .idle,
                   let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
                 return
             }
-            self.lastFrontmostApplication = application
+            self.stateQueue.async {
+                if self.state == .idle {
+                    self.lastFrontmostApplication = application
+                }
+            }
+        }
+
+        storeObserver = NotificationCenter.default.addObserver(
+            forName: .gestureStoreDidChange,
+            object: store,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            let preferences = store.preferences
+            self.stateQueue.async {
+                self.preferences = preferences
+            }
         }
     }
 
     deinit {
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+        }
+        if let storeObserver {
+            NotificationCenter.default.removeObserver(storeObserver)
         }
         stop()
     }
@@ -103,11 +123,30 @@ final class EventTapManager {
         }
 
         eventTap = tap
-        runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-
-        if let runLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            eventTap = nil
+            onStatusChange?("事件拦截启动失败")
+            return false
         }
+
+        runLoopSource = source
+        let ready = DispatchSemaphore(value: 0)
+        let thread = Thread { [weak self] in
+            let runLoop = CFRunLoopGetCurrent()
+            self?.stateQueue.sync {
+                self?.tapRunLoop = runLoop
+            }
+            CFRunLoopAddSource(runLoop, source, .commonModes)
+            ready.signal()
+            CFRunLoopRun()
+            CFRunLoopRemoveSource(runLoop, source, .commonModes)
+        }
+        thread.name = "com.face.mygestures.eventtap"
+        thread.qualityOfService = .userInteractive
+        tapThread = thread
+        thread.start()
+        ready.wait()
 
         CGEvent.tapEnable(tap: tap, enable: true)
         log("主动右键拦截已启动。普通右键会补发，右键拖动会进入手势模式。")
@@ -116,7 +155,10 @@ final class EventTapManager {
     }
 
     func stop() {
-        resetTracking(reason: "监听停止")
+        let runLoop = stateQueue.sync { () -> CFRunLoop? in
+            resetTracking(reason: "监听停止")
+            return tapRunLoop
+        }
 
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
@@ -127,11 +169,39 @@ final class EventTapManager {
             CFRunLoopSourceInvalidate(runLoopSource)
         }
 
+        if let runLoop {
+            CFRunLoopStop(runLoop)
+        }
+
         eventTap = nil
         runLoopSource = nil
+        tapThread = nil
+        stateQueue.sync {
+            tapRunLoop = nil
+        }
     }
 
     func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            return stateQueue.sync {
+                handleLocked(proxy: proxy, type: type, event: event)
+            }
+        }
+
+        guard isRightMouseEvent(type) else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        if event.getIntegerValueField(.eventSourceUserData) == syntheticMarker {
+            return Unmanaged.passUnretained(event)
+        }
+
+        return stateQueue.sync {
+            handleLocked(proxy: proxy, type: type, event: event)
+        }
+    }
+
+    private func handleLocked(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             resetTracking(reason: "系统禁用了事件 tap，已重置状态")
             if let eventTap {
@@ -144,21 +214,6 @@ final class EventTapManager {
 
         guard isRightMouseEvent(type) else {
             return Unmanaged.passUnretained(event)
-        }
-
-        if event.getIntegerValueField(.eventSourceUserData) == syntheticMarker {
-            return Unmanaged.passUnretained(event)
-        }
-
-        if passThroughAfterTimeoutUntilRightMouseUp {
-            if type == .rightMouseUp {
-                passThroughAfterTimeoutUntilRightMouseUp = false
-                return nil
-            }
-            if type == .rightMouseDragged {
-                return Unmanaged.passUnretained(event)
-            }
-            passThroughAfterTimeoutUntilRightMouseUp = false
         }
 
         let location = event.location
@@ -187,7 +242,6 @@ final class EventTapManager {
         points = [location]
         displayPoints = [DisplayCoordinateConverter.eventLocationToOverlayPoint(location)]
         log("右键按下已拦截 raw=\(format(location)) display=\(format(displayPoints[0]))")
-        armDecisionTimer()
         armGestureTimeoutTimer()
         armSafetyTimer()
         return nil
@@ -201,22 +255,21 @@ final class EventTapManager {
             let moved = distance(startPoint, location)
             if moved >= movementThreshold {
                 state = .gesturing
-                decisionToken = nil
                 log("进入手势模式，移动距离 \(Int(moved))px")
-                if store.preferences.showTrail {
-                    overlay.show(points: displayPoints)
+                if preferences.showTrail {
+                    showOverlay(points: displayPoints)
                 }
             }
             return nil
 
         case .gesturing:
             appendPoint(location)
-            if store.preferences.showTrail {
-                overlay.update(points: displayPoints)
+            if preferences.showTrail {
+                updateOverlay(points: displayPoints)
             }
             return nil
 
-        case .clickReplayedAwaitingUp, .cleanupAwaitingUp:
+        case .cleanupAwaitingUp:
             return nil
 
         case .idle:
@@ -247,10 +300,6 @@ final class EventTapManager {
                     frontmostApplicationAtGestureStart: capturedFrontmostApplication
                 )
             }
-            return nil
-
-        case .clickReplayedAwaitingUp:
-            resetTracking(reason: "物理右键松开，结束补发等待")
             return nil
 
         case .cleanupAwaitingUp:
@@ -289,7 +338,8 @@ final class EventTapManager {
             )
             let delivery = target.usesProcessPosting ? "按进程投递" : "系统前台投递"
             log("识别到 \(match.command.name)，距离=\(String(format: "%.3f", Double(match.distance)))，目标=\(target.displayName)，方式=\(delivery)，执行快捷键=\(shortcut.displayName)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            let deliveryDelay: TimeInterval = target.restoresOriginalFrontmostApplication ? 0 : 0.03
+            DispatchQueue.main.asyncAfter(deadline: .now() + deliveryDelay) {
                 if target.restoresOriginalFrontmostApplication {
                     GestureTargetController.restoreFrontmostApplication(frontmostApplicationAtGestureStart)
                 }
@@ -348,8 +398,6 @@ final class EventTapManager {
 
     private func resetTracking(reason: String) {
         state = .idle
-        passThroughAfterTimeoutUntilRightMouseUp = false
-        decisionToken = nil
         gestureTimeoutToken = nil
         safetyToken = nil
         points = []
@@ -357,34 +405,16 @@ final class EventTapManager {
         frontmostApplicationAtGestureStart = nil
         startPoint = .zero
         lastPoint = .zero
-        overlay.hide()
+        hideOverlay()
         log(reason)
-    }
-
-    private func armDecisionTimer() {
-        let token = UUID()
-        decisionToken = token
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + startTimeout) { [weak self] in
-            guard let self,
-                  self.decisionToken == token,
-                  self.state == .pending else {
-                return
-            }
-
-            self.replayRightClick(at: self.startPoint, reason: "150ms 内未移动，补发普通右键")
-            self.state = .clickReplayedAwaitingUp
-            self.decisionToken = nil
-            self.log("已补发普通右键，等待物理右键松开")
-        }
     }
 
     private func armSafetyTimer() {
         let token = UUID()
         safetyToken = token
-        let timeout = max(safetyTimeout, store.preferences.gestureTimeoutSeconds + 2)
+        let timeout = max(safetyTimeout, preferences.gestureTimeoutSeconds + 2)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+        stateQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
             guard let self,
                   self.safetyToken == token,
                   self.state != .idle else {
@@ -392,10 +422,9 @@ final class EventTapManager {
             }
 
             self.state = .cleanupAwaitingUp
-            self.decisionToken = nil
             self.points = []
             self.displayPoints = []
-            self.overlay.hide()
+            self.hideOverlay()
             self.log("保险重置，继续吞掉事件直到物理右键松开")
         }
     }
@@ -403,20 +432,47 @@ final class EventTapManager {
     private func armGestureTimeoutTimer() {
         let token = UUID()
         gestureTimeoutToken = token
-        let timeout = max(0.5, store.preferences.gestureTimeoutSeconds)
+        let timeout = max(0.5, preferences.gestureTimeoutSeconds)
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+        stateQueue.asyncAfter(deadline: .now() + timeout) { [weak self] in
             guard let self,
                   self.gestureTimeoutToken == token,
                   self.state == .gesturing else {
                 return
             }
 
-            self.resetTracking(reason: "超时手势已取消")
-            self.passThroughAfterTimeoutUntilRightMouseUp = true
-            self.onGestureMatch?(nil)
-            self.onStatusChange?("本次手势超时，已取消")
+            self.state = .cleanupAwaitingUp
+            self.gestureTimeoutToken = nil
+            self.safetyToken = nil
+            self.points = []
+            self.displayPoints = []
+            self.frontmostApplicationAtGestureStart = nil
+            self.startPoint = .zero
+            self.lastPoint = .zero
+            self.hideOverlay()
+            DispatchQueue.main.async { [weak self] in
+                self?.onGestureMatch?(nil)
+                self?.onStatusChange?("本次手势超时，已取消")
+            }
             self.log("手势超过 \(String(format: "%.1f", timeout)) 秒，已取消")
+        }
+    }
+
+    private func showOverlay(points: [CGPoint]) {
+        DispatchQueue.main.async { [overlay] in
+            overlay.show(points: points)
+        }
+    }
+
+    private func updateOverlay(points: [CGPoint]) {
+        DispatchQueue.main.async { [overlay] in
+            overlay.update(points: points)
+        }
+    }
+
+    private func hideOverlay() {
+        DispatchQueue.main.async { [overlay] in
+            overlay.hide()
         }
     }
 

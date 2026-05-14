@@ -85,7 +85,7 @@ struct AppPreferences: Codable, Equatable {
     }
 
     static let defaults = AppPreferences(
-        gesturesEnabled: false,
+        gesturesEnabled: true,
         showTrail: true,
         showMenuBarIcon: true,
         recognitionThreshold: 0.34,
@@ -177,7 +177,7 @@ final class GestureStore {
             key: preferencesKey,
             legacyKeys: [Self.legacyMyGesturesPreferencesKey, Self.legacyPreferencesKey]
         ) ?? .defaults
-        preferences.gesturesEnabled = false
+        preferences.gesturesEnabled = true
         localizeBuiltInGestureNames()
         savePreferences()
     }
@@ -219,6 +219,7 @@ final class GestureStore {
 
         gestures = backup.gestures
         preferences = backup.preferences
+        preferences.gesturesEnabled = true
         localizeBuiltInGestureNames()
         saveGestures()
         savePreferences()

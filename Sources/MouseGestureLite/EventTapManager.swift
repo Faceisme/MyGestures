@@ -27,6 +27,7 @@ final class EventTapManager {
     private let recognizer = GestureRecognizer()
     private let overlay = GestureOverlayController()
     private let stateQueue = DispatchQueue(label: "com.face.mygestures.eventtap.state", qos: .userInteractive)
+    private let stateQueueKey = DispatchSpecificKey<Void>()
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -53,6 +54,7 @@ final class EventTapManager {
     init(store: GestureStore = .shared) {
         self.store = store
         preferences = store.preferences
+        stateQueue.setSpecific(key: stateQueueKey, value: ())
         lastFrontmostApplication = NSWorkspace.shared.frontmostApplication
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
@@ -134,8 +136,10 @@ final class EventTapManager {
         let ready = DispatchSemaphore(value: 0)
         let thread = Thread { [weak self] in
             let runLoop = CFRunLoopGetCurrent()
-            self?.stateQueue.sync {
-                self?.tapRunLoop = runLoop
+            if let self {
+                self.syncState {
+                    self.tapRunLoop = runLoop
+                }
             }
             CFRunLoopAddSource(runLoop, source, .commonModes)
             ready.signal()
@@ -155,9 +159,20 @@ final class EventTapManager {
     }
 
     func stop() {
-        let runLoop = stateQueue.sync { () -> CFRunLoop? in
-            resetTracking(reason: "监听停止")
-            return tapRunLoop
+        let runLoop = syncState {
+            state = .idle
+            gestureTimeoutToken = nil
+            safetyToken = nil
+            points = []
+            displayPoints = []
+            frontmostApplicationAtGestureStart = nil
+            startPoint = .zero
+            lastPoint = .zero
+            let runLoop = tapRunLoop
+            tapRunLoop = nil
+            hideOverlay()
+            log("监听停止")
+            return runLoop
         }
 
         if let eventTap {
@@ -176,14 +191,11 @@ final class EventTapManager {
         eventTap = nil
         runLoopSource = nil
         tapThread = nil
-        stateQueue.sync {
-            tapRunLoop = nil
-        }
     }
 
     func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            return stateQueue.sync {
+            return syncState {
                 handleLocked(proxy: proxy, type: type, event: event)
             }
         }
@@ -196,7 +208,7 @@ final class EventTapManager {
             return Unmanaged.passUnretained(event)
         }
 
-        return stateQueue.sync {
+        return syncState {
             handleLocked(proxy: proxy, type: type, event: event)
         }
     }
@@ -280,8 +292,9 @@ final class EventTapManager {
     private func handleRightMouseUp(at location: CGPoint, event: CGEvent) -> Unmanaged<CGEvent>? {
         switch state {
         case .pending:
-            replayRightClick(at: startPoint, reason: "未进入手势，补发普通右键")
+            let point = startPoint
             resetTracking(reason: "普通右键完成")
+            replayRightClickAsync(at: point, reason: "未进入手势，补发普通右键")
             return nil
 
         case .gesturing:
@@ -390,6 +403,12 @@ final class EventTapManager {
         up.post(tap: .cgSessionEventTap)
     }
 
+    private func replayRightClickAsync(at point: CGPoint, reason: String) {
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            self?.replayRightClick(at: point, reason: reason)
+        }
+    }
+
     private func appendPoint(_ point: CGPoint) {
         lastPoint = point
         points.append(point)
@@ -473,6 +492,16 @@ final class EventTapManager {
     private func hideOverlay() {
         DispatchQueue.main.async { [overlay] in
             overlay.hide()
+        }
+    }
+
+    private func syncState<T>(_ work: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: stateQueueKey) != nil {
+            return work()
+        }
+
+        return stateQueue.sync {
+            work()
         }
     }
 

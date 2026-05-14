@@ -60,11 +60,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !store.preferences.showMenuBarIcon {
-            store.updatePreferences { preferences in
-                preferences.showMenuBarIcon = true
-            }
-        }
         openSettings()
         return true
     }

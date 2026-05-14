@@ -19,6 +19,14 @@ struct GestureExecutionTarget {
 }
 
 enum GestureTargetController {
+    private struct WindowCandidate {
+        let pid: pid_t
+        let windowID: CGWindowID
+        let ownerName: String
+        let title: String
+        let bounds: CGRect
+    }
+
     static func executionTarget(
         at point: CGPoint,
         policy: GestureTargetPolicy,
@@ -66,19 +74,16 @@ enum GestureTargetController {
     }
 
     private static func targetUnderPointer(at point: CGPoint) -> GestureExecutionTarget {
-        DebugLogger.write("Target: lookup point=\(format(point))")
-        guard let element = elementAtPosition(point) else {
-            DebugLogger.write("Target: no AX element at pointer")
-            return GestureExecutionTarget(
-                policy: .windowUnderPointer,
-                pid: nil,
-                displayName: "未找到鼠标指针下方应用，已回退到活动窗口",
-                restoresOriginalFrontmostApplication: false,
-                postsToProcess: false,
-                deliveryDelay: 0,
-                window: nil,
-                prefersDirectWindowClose: false
-            )
+        let accessibilityPoint = DisplayCoordinateConverter.eventLocationToAccessibilityPoint(point)
+        DebugLogger.write("Target: lookup eventPoint=\(format(point)) axPoint=\(format(accessibilityPoint))")
+        guard let element = elementAtPosition(accessibilityPoint) ?? fallbackElementAtOriginalPoint(point, accessibilityPoint: accessibilityPoint) else {
+            DebugLogger.write("Target: no AX element at pointer, trying CGWindow fallback")
+            if let candidate = windowCandidate(at: accessibilityPoint) ?? fallbackWindowCandidateAtOriginalPoint(point, accessibilityPoint: accessibilityPoint) {
+                return target(from: candidate)
+            }
+
+            DebugLogger.write("Target: no CGWindow fallback at pointer")
+            return fallbackTarget(reason: "未找到鼠标指针下方应用，已回退到活动窗口")
         }
 
         DebugLogger.write("Target: element \(elementSummary(element))")
@@ -113,6 +118,32 @@ enum GestureTargetController {
             policy: .windowUnderPointer,
             pid: pid,
             displayName: "鼠标指针下方并已切换：\(name?.isEmpty == false ? name! : "pid \(pid)")",
+            restoresOriginalFrontmostApplication: false,
+            postsToProcess: false,
+            deliveryDelay: isWeChatFamily ? 0.12 : 0.08,
+            window: window,
+            prefersDirectWindowClose: isWeChatFamily
+        )
+    }
+
+    private static func target(from candidate: WindowCandidate) -> GestureExecutionTarget {
+        DebugLogger.write("Target: CGWindow candidate id=\(candidate.windowID) pid=\(candidate.pid) owner=\(candidate.ownerName) title=\(candidate.title) bounds=\(format(candidate.bounds))")
+        let rawApp = NSRunningApplication(processIdentifier: candidate.pid)
+        let app = foregroundApplication(for: rawApp) ?? rawApp
+        let isWeChatFamily = isWeChat(rawApp) || isWeChat(app) || isWeChatText(candidate.ownerName)
+        let window = axWindow(matching: candidate)
+        DebugLogger.write("Target: CGWindow rawApp=\(applicationSummary(rawApp)) foregroundApp=\(applicationSummary(app)) isWeChatFamily=\(isWeChatFamily) axWindow=\(elementSummary(window))")
+
+        app?.activate(options: [.activateAllWindows])
+        if let window {
+            focus(window: window, pid: candidate.pid)
+        }
+
+        let name = app?.localizedName
+        return GestureExecutionTarget(
+            policy: .windowUnderPointer,
+            pid: candidate.pid,
+            displayName: "鼠标指针下方并已切换：\(name?.isEmpty == false ? name! : "pid \(candidate.pid)")",
             restoresOriginalFrontmostApplication: false,
             postsToProcess: false,
             deliveryDelay: isWeChatFamily ? 0.12 : 0.08,
@@ -164,12 +195,129 @@ enum GestureTargetController {
         return element
     }
 
+    private static func fallbackElementAtOriginalPoint(_ point: CGPoint, accessibilityPoint: CGPoint) -> AXUIElement? {
+        guard point != accessibilityPoint else {
+            return nil
+        }
+
+        DebugLogger.write("Target: axPoint missed, retry eventPoint=\(format(point))")
+        return elementAtPosition(point)
+    }
+
+    private static func windowCandidate(at point: CGPoint) -> WindowCandidate? {
+        let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
+        guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+
+        for info in windowList {
+            guard let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue,
+                  layer == 0,
+                  let onscreen = info[kCGWindowIsOnscreen as String] as? Bool,
+                  onscreen,
+                  let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue,
+                  alpha > 0.01,
+                  let pidNumber = info[kCGWindowOwnerPID as String] as? NSNumber,
+                  let windowIDNumber = info[kCGWindowNumber as String] as? NSNumber,
+                  let boundsDictionary = info[kCGWindowBounds as String] as? NSDictionary,
+                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary),
+                  bounds.width >= 40,
+                  bounds.height >= 40,
+                  bounds.contains(point) else {
+                continue
+            }
+
+            return WindowCandidate(
+                pid: pid_t(pidNumber.intValue),
+                windowID: CGWindowID(windowIDNumber.uint32Value),
+                ownerName: info[kCGWindowOwnerName as String] as? String ?? "",
+                title: info[kCGWindowName as String] as? String ?? "",
+                bounds: bounds
+            )
+        }
+
+        return nil
+    }
+
+    private static func fallbackWindowCandidateAtOriginalPoint(_ point: CGPoint, accessibilityPoint: CGPoint) -> WindowCandidate? {
+        guard point != accessibilityPoint else {
+            return nil
+        }
+
+        DebugLogger.write("Target: CGWindow axPoint missed, retry eventPoint=\(format(point))")
+        return windowCandidate(at: point)
+    }
+
     private static func processIdentifier(for element: AXUIElement) -> pid_t? {
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success else {
             return nil
         }
         return pid
+    }
+
+    private static func axWindow(matching candidate: WindowCandidate) -> AXUIElement? {
+        let app = AXUIElementCreateApplication(candidate.pid)
+        guard let windows = axElementArrayAttribute(kAXWindowsAttribute, of: app) else {
+            DebugLogger.write("Target: no AX windows for CGWindow pid=\(candidate.pid)")
+            return nil
+        }
+
+        let matches = windows.compactMap { window -> (AXUIElement, CGFloat)? in
+            guard let frame = frame(of: window) else {
+                return nil
+            }
+            return (window, frameDistance(frame, candidate.bounds))
+        }
+
+        if let best = matches.min(by: { $0.1 < $1.1 }), best.1 <= 80 {
+            return best.0
+        }
+
+        DebugLogger.write("Target: no AX window match for CGWindow bounds=\(format(candidate.bounds)) candidates=\(windows.map { elementSummary($0) }.joined(separator: " | "))")
+        return nil
+    }
+
+    private static func frame(of window: AXUIElement) -> CGRect? {
+        guard let position = pointAttribute(kAXPositionAttribute, of: window),
+              let size = sizeAttribute(kAXSizeAttribute, of: window) else {
+            return nil
+        }
+
+        return CGRect(origin: position, size: size)
+    }
+
+    private static func pointAttribute(_ name: String, of element: AXUIElement) -> CGPoint? {
+        guard let value = attribute(name, of: element),
+              CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        var point = CGPoint.zero
+        guard AXValueGetValue((value as! AXValue), .cgPoint, &point) else {
+            return nil
+        }
+        return point
+    }
+
+    private static func sizeAttribute(_ name: String, of element: AXUIElement) -> CGSize? {
+        guard let value = attribute(name, of: element),
+              CFGetTypeID(value) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        var size = CGSize.zero
+        guard AXValueGetValue((value as! AXValue), .cgSize, &size) else {
+            return nil
+        }
+        return size
+    }
+
+    private static func frameDistance(_ left: CGRect, _ right: CGRect) -> CGFloat {
+        abs(left.minX - right.minX)
+            + abs(left.minY - right.minY)
+            + abs(left.width - right.width)
+            + abs(left.height - right.height)
     }
 
     private static func foregroundApplication(for application: NSRunningApplication?) -> NSRunningApplication? {
@@ -237,13 +385,30 @@ enum GestureTargetController {
         }
 
         let name = application.localizedName ?? ""
-        return name.localizedCaseInsensitiveContains("微信")
-            || name.localizedCaseInsensitiveContains("wechat")
+        return isWeChatText(name)
     }
 
     private static func isWeChatBundleIdentifier(_ bundleIdentifier: String) -> Bool {
         bundleIdentifier.localizedCaseInsensitiveContains("wechat")
             || bundleIdentifier.localizedCaseInsensitiveContains("xinwechat")
+    }
+
+    private static func isWeChatText(_ text: String) -> Bool {
+        text.localizedCaseInsensitiveContains("微信")
+            || text.localizedCaseInsensitiveContains("wechat")
+    }
+
+    private static func fallbackTarget(reason: String) -> GestureExecutionTarget {
+        GestureExecutionTarget(
+            policy: .windowUnderPointer,
+            pid: nil,
+            displayName: reason,
+            restoresOriginalFrontmostApplication: false,
+            postsToProcess: false,
+            deliveryDelay: 0,
+            window: nil,
+            prefersDirectWindowClose: false
+        )
     }
 
     private static func elementSummary(_ element: AXUIElement?) -> String {
@@ -296,6 +461,10 @@ enum GestureTargetController {
         "(\(Int(point.x)), \(Int(point.y)))"
     }
 
+    private static func format(_ rect: CGRect) -> String {
+        "(\(Int(rect.minX)), \(Int(rect.minY)), \(Int(rect.width)), \(Int(rect.height)))"
+    }
+
     private static func role(of element: AXUIElement) -> String? {
         attribute(kAXRoleAttribute, of: element) as? String
     }
@@ -306,6 +475,20 @@ enum GestureTargetController {
             return nil
         }
         return (value as! AXUIElement)
+    }
+
+    private static func axElementArrayAttribute(_ name: String, of element: AXUIElement) -> [AXUIElement]? {
+        guard let value = attribute(name, of: element),
+              CFGetTypeID(value) == CFArrayGetTypeID() else {
+            return nil
+        }
+
+        return (value as! [Any]).compactMap { item in
+            guard CFGetTypeID(item as CFTypeRef) == AXUIElementGetTypeID() else {
+                return nil
+            }
+            return (item as! AXUIElement)
+        }
     }
 
     private static func attribute(_ name: String, of element: AXUIElement) -> CFTypeRef? {

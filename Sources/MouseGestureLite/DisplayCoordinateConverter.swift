@@ -4,6 +4,14 @@ import Foundation
 
 enum DisplayCoordinateConverter {
     static func eventLocationToOverlayPoint(_ point: CGPoint) -> CGPoint {
+        eventLocationToTopLeftDesktopPoint(point)
+    }
+
+    static func eventLocationToAccessibilityPoint(_ point: CGPoint) -> CGPoint {
+        eventLocationToTopLeftDesktopPoint(point)
+    }
+
+    private static func eventLocationToTopLeftDesktopPoint(_ point: CGPoint) -> CGPoint {
         let desktopFrame = NSScreen.screens.reduce(NSRect.zero) { partial, screen in
             partial.union(screen.frame)
         }

@@ -528,5 +528,6 @@ final class EventTapManager {
     }
 
     private func log(_ message: String) {
+        DebugLogger.write("EventTapManager: \(message)")
     }
 }

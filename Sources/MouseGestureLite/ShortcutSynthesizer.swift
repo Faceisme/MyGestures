@@ -17,6 +17,7 @@ enum ShortcutSynthesizer {
 
     private static func sendKey(keyCode: UInt16, modifierFlags: UInt64 = 0, pid: pid_t?) {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
+            DebugLogger.write("Shortcut: missing CGEventSource keyCode=\(keyCode) flags=\(modifierFlags) pid=\(pid.map(String.init) ?? "nil")")
             return
         }
 
@@ -30,6 +31,7 @@ enum ShortcutSynthesizer {
         keyUp?.flags = flags
 
         if let pid {
+            DebugLogger.write("Shortcut: postToPid pid=\(pid) keyCode=\(keyCode) flags=\(modifierFlags)")
             if let keyDown {
                 keyDown.postToPid(pid)
             }
@@ -37,6 +39,7 @@ enum ShortcutSynthesizer {
                 keyUp.postToPid(pid)
             }
         } else {
+            DebugLogger.write("Shortcut: postGlobal keyCode=\(keyCode) flags=\(modifierFlags)")
             keyDown?.post(tap: .cghidEventTap)
             keyUp?.post(tap: .cghidEventTap)
         }

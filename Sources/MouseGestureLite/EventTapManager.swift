@@ -159,7 +159,7 @@ final class EventTapManager {
     }
 
     func stop() {
-        let runLoop = syncState {
+        let (runLoop, tap, source) = syncState {
             state = .idle
             gestureTimeoutToken = nil
             safetyToken = nil
@@ -169,28 +169,30 @@ final class EventTapManager {
             startPoint = .zero
             lastPoint = .zero
             let runLoop = tapRunLoop
+            let tap = eventTap
+            let source = runLoopSource
             tapRunLoop = nil
+            eventTap = nil
+            runLoopSource = nil
             hideOverlay()
             log("监听停止")
-            return runLoop
+            return (runLoop, tap, source)
         }
 
-        if let eventTap {
-            CGEvent.tapEnable(tap: eventTap, enable: false)
-            CFMachPortInvalidate(eventTap)
+        tapThread = nil
+
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
         }
 
-        if let runLoopSource {
-            CFRunLoopSourceInvalidate(runLoopSource)
+        if let source {
+            CFRunLoopSourceInvalidate(source)
         }
 
         if let runLoop {
             CFRunLoopStop(runLoop)
         }
-
-        eventTap = nil
-        runLoopSource = nil
-        tapThread = nil
     }
 
     func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {

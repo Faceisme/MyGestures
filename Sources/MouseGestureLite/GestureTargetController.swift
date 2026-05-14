@@ -10,6 +10,8 @@ struct GestureExecutionTarget {
     let restoresOriginalFrontmostApplication: Bool
     let postsToProcess: Bool
     let deliveryDelay: TimeInterval
+    let window: AXUIElement?
+    let prefersDirectWindowClose: Bool
 
     var usesProcessPosting: Bool {
         postsToProcess && pid != nil
@@ -32,7 +34,9 @@ enum GestureTargetController {
                     displayName: "手势开始时的活动应用：\(name?.isEmpty == false ? name! : "pid \(frontmostApplicationAtGestureStart.processIdentifier)")",
                     restoresOriginalFrontmostApplication: true,
                     postsToProcess: false,
-                    deliveryDelay: 0
+                    deliveryDelay: 0,
+                    window: nil,
+                    prefersDirectWindowClose: false
                 )
             }
 
@@ -42,7 +46,9 @@ enum GestureTargetController {
                 displayName: "未找到手势开始时的活动应用，已回退到系统前台",
                 restoresOriginalFrontmostApplication: false,
                 postsToProcess: false,
-                deliveryDelay: 0
+                deliveryDelay: 0,
+                window: nil,
+                prefersDirectWindowClose: false
             )
 
         case .windowUnderPointer:
@@ -67,7 +73,9 @@ enum GestureTargetController {
                 displayName: "未找到鼠标指针下方应用，已回退到活动窗口",
                 restoresOriginalFrontmostApplication: false,
                 postsToProcess: false,
-                deliveryDelay: 0
+                deliveryDelay: 0,
+                window: nil,
+                prefersDirectWindowClose: false
             )
         }
 
@@ -80,11 +88,15 @@ enum GestureTargetController {
                 displayName: "未找到鼠标指针下方应用，已回退到活动窗口",
                 restoresOriginalFrontmostApplication: false,
                 postsToProcess: false,
-                deliveryDelay: 0
+                deliveryDelay: 0,
+                window: nil,
+                prefersDirectWindowClose: false
             )
         }
 
-        let app = NSRunningApplication(processIdentifier: pid)
+        let rawApp = NSRunningApplication(processIdentifier: pid)
+        let app = foregroundApplication(for: rawApp) ?? rawApp
+        let isWeChatFamily = isWeChat(rawApp) || isWeChat(app)
         app?.activate(options: [.activateAllWindows])
         if let window {
             focus(window: window, pid: pid)
@@ -97,8 +109,31 @@ enum GestureTargetController {
             displayName: "鼠标指针下方并已切换：\(name?.isEmpty == false ? name! : "pid \(pid)")",
             restoresOriginalFrontmostApplication: false,
             postsToProcess: false,
-            deliveryDelay: 0.08
+            deliveryDelay: isWeChatFamily ? 0.12 : 0.08,
+            window: window,
+            prefersDirectWindowClose: isWeChatFamily
         )
+    }
+
+    static func performDirectWindowCloseIfAvailable(
+        for target: GestureExecutionTarget,
+        shortcut: Shortcut
+    ) -> Bool {
+        guard target.prefersDirectWindowClose,
+              isCommandW(shortcut),
+              let window = target.window else {
+            return false
+        }
+
+        if let pid = target.pid {
+            focus(window: window, pid: pid)
+        }
+
+        guard let closeButton = axElementAttribute(kAXCloseButtonAttribute, of: window) else {
+            return false
+        }
+
+        return AXUIElementPerformAction(closeButton, kAXPressAction as CFString) == .success
     }
 
     private static func elementAtPosition(_ point: CGPoint) -> AXUIElement? {
@@ -123,6 +158,21 @@ enum GestureTargetController {
             return nil
         }
         return pid
+    }
+
+    private static func foregroundApplication(for application: NSRunningApplication?) -> NSRunningApplication? {
+        guard let application,
+              let bundleIdentifier = application.bundleIdentifier else {
+            return application
+        }
+
+        if isWeChatBundleIdentifier(bundleIdentifier),
+           bundleIdentifier != "com.tencent.xinWeChat",
+           let mainWeChat = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.tencent.xinWeChat" }) {
+            return mainWeChat
+        }
+
+        return application
     }
 
     private static func windowElement(containing element: AXUIElement) -> AXUIElement? {
@@ -155,6 +205,32 @@ enum GestureTargetController {
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+    }
+
+    private static func isCommandW(_ shortcut: Shortcut) -> Bool {
+        let flags = CGEventFlags(rawValue: CGEventFlags.RawValue(shortcut.modifierFlags))
+        let shortcutFlags: CGEventFlags = [.maskCommand, .maskAlternate, .maskControl, .maskShift, .maskSecondaryFn]
+        return shortcut.keyCode == VirtualKeyCode.w && flags.intersection(shortcutFlags) == .maskCommand
+    }
+
+    private static func isWeChat(_ application: NSRunningApplication?) -> Bool {
+        guard let application else {
+            return false
+        }
+
+        if let bundleIdentifier = application.bundleIdentifier,
+           isWeChatBundleIdentifier(bundleIdentifier) {
+            return true
+        }
+
+        let name = application.localizedName ?? ""
+        return name.localizedCaseInsensitiveContains("微信")
+            || name.localizedCaseInsensitiveContains("wechat")
+    }
+
+    private static func isWeChatBundleIdentifier(_ bundleIdentifier: String) -> Bool {
+        bundleIdentifier.localizedCaseInsensitiveContains("wechat")
+            || bundleIdentifier.localizedCaseInsensitiveContains("xinwechat")
     }
 
     private static func role(of element: AXUIElement) -> String? {

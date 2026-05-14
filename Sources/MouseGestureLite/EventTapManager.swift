@@ -358,7 +358,12 @@ final class EventTapManager {
                     GestureTargetController.restoreFrontmostApplication(frontmostApplicationAtGestureStart)
                 }
 
-                if let pid = target.pid {
+                if GestureTargetController.performDirectWindowCloseIfAvailable(for: target, shortcut: shortcut) {
+                    self.log("已通过辅助功能直接关闭目标窗口")
+                    return
+                }
+
+                if target.usesProcessPosting, let pid = target.pid {
                     ShortcutSynthesizer.send(shortcut, toPid: pid)
                 } else {
                     ShortcutSynthesizer.send(shortcut)

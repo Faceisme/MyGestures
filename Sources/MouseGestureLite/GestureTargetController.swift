@@ -8,9 +8,11 @@ struct GestureExecutionTarget {
     let pid: pid_t?
     let displayName: String
     let restoresOriginalFrontmostApplication: Bool
+    let postsToProcess: Bool
+    let deliveryDelay: TimeInterval
 
     var usesProcessPosting: Bool {
-        pid != nil
+        postsToProcess && pid != nil
     }
 }
 
@@ -28,7 +30,9 @@ enum GestureTargetController {
                     policy: policy,
                     pid: nil,
                     displayName: "手势开始时的活动应用：\(name?.isEmpty == false ? name! : "pid \(frontmostApplicationAtGestureStart.processIdentifier)")",
-                    restoresOriginalFrontmostApplication: true
+                    restoresOriginalFrontmostApplication: true,
+                    postsToProcess: false,
+                    deliveryDelay: 0
                 )
             }
 
@@ -36,7 +40,9 @@ enum GestureTargetController {
                 policy: policy,
                 pid: nil,
                 displayName: "未找到手势开始时的活动应用，已回退到系统前台",
-                restoresOriginalFrontmostApplication: false
+                restoresOriginalFrontmostApplication: false,
+                postsToProcess: false,
+                deliveryDelay: 0
             )
 
         case .windowUnderPointer:
@@ -59,7 +65,9 @@ enum GestureTargetController {
                 policy: .windowUnderPointer,
                 pid: nil,
                 displayName: "未找到鼠标指针下方应用，已回退到活动窗口",
-                restoresOriginalFrontmostApplication: false
+                restoresOriginalFrontmostApplication: false,
+                postsToProcess: false,
+                deliveryDelay: 0
             )
         }
 
@@ -70,7 +78,9 @@ enum GestureTargetController {
                 policy: .windowUnderPointer,
                 pid: nil,
                 displayName: "未找到鼠标指针下方应用，已回退到活动窗口",
-                restoresOriginalFrontmostApplication: false
+                restoresOriginalFrontmostApplication: false,
+                postsToProcess: false,
+                deliveryDelay: 0
             )
         }
 
@@ -85,7 +95,9 @@ enum GestureTargetController {
             policy: .windowUnderPointer,
             pid: pid,
             displayName: "鼠标指针下方并已切换：\(name?.isEmpty == false ? name! : "pid \(pid)")",
-            restoresOriginalFrontmostApplication: false
+            restoresOriginalFrontmostApplication: false,
+            postsToProcess: false,
+            deliveryDelay: 0.08
         )
     }
 

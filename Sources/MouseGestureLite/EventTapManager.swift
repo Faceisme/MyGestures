@@ -353,8 +353,7 @@ final class EventTapManager {
             )
             let delivery = target.usesProcessPosting ? "按进程投递" : "系统前台投递"
             log("识别到 \(match.command.name)，距离=\(String(format: "%.3f", Double(match.distance)))，目标=\(target.displayName)，方式=\(delivery)，执行快捷键=\(shortcut.displayName)")
-            let deliveryDelay: TimeInterval = target.restoresOriginalFrontmostApplication ? 0 : 0.03
-            DispatchQueue.main.asyncAfter(deadline: .now() + deliveryDelay) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + target.deliveryDelay) {
                 if target.restoresOriginalFrontmostApplication {
                     GestureTargetController.restoreFrontmostApplication(frontmostApplicationAtGestureStart)
                 }

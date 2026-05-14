@@ -64,11 +64,8 @@ enum GestureTargetController {
         }
 
         let window = windowElement(containing: element)
-        if let window {
-            raise(window: window)
-        }
-
-        guard let pid = processIdentifier(for: element) else {
+        let pid = window.flatMap(processIdentifier(for:)) ?? processIdentifier(for: element)
+        guard let pid else {
             return GestureExecutionTarget(
                 policy: .windowUnderPointer,
                 pid: nil,
@@ -79,11 +76,14 @@ enum GestureTargetController {
 
         let app = NSRunningApplication(processIdentifier: pid)
         app?.activate(options: [.activateAllWindows])
+        if let window {
+            focus(window: window, pid: pid)
+        }
 
         let name = app?.localizedName
         return GestureExecutionTarget(
             policy: .windowUnderPointer,
-            pid: nil,
+            pid: pid,
             displayName: "鼠标指针下方并已切换：\(name?.isEmpty == false ? name! : "pid \(pid)")",
             restoresOriginalFrontmostApplication: false
         )
@@ -136,7 +136,10 @@ enum GestureTargetController {
         return nil
     }
 
-    private static func raise(window: AXUIElement) {
+    private static func focus(window: AXUIElement, pid: pid_t) {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(app, kAXFocusedWindowAttribute as CFString, window)
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)

@@ -71,6 +71,21 @@ enum GestureTargetController {
         application.activate(options: [.activateAllWindows])
     }
 
+    static func prepareForExecution(_ target: GestureExecutionTarget) {
+        guard target.policy == .windowUnderPointer,
+              let pid = target.pid else {
+            return
+        }
+
+        let rawApp = NSRunningApplication(processIdentifier: pid)
+        let app = foregroundApplication(for: rawApp) ?? rawApp
+        app?.activate(options: [.activateAllWindows])
+
+        if let window = target.window {
+            focus(window: window, pid: pid)
+        }
+    }
+
     private static func targetUnderPointer(at point: CGPoint) -> GestureExecutionTarget {
         let candidatePoints = targetLookupPoints(for: point)
         guard let element = firstElementAtPosition(candidatePoints) else {
@@ -99,10 +114,6 @@ enum GestureTargetController {
         let rawApp = NSRunningApplication(processIdentifier: pid)
         let app = foregroundApplication(for: rawApp) ?? rawApp
         let isWeChatFamily = isWeChat(rawApp) || isWeChat(app)
-        app?.activate(options: [.activateAllWindows])
-        if let window {
-            focus(window: window, pid: pid)
-        }
 
         let name = app?.localizedName
         return GestureExecutionTarget(
@@ -122,11 +133,6 @@ enum GestureTargetController {
         let app = foregroundApplication(for: rawApp) ?? rawApp
         let isWeChatFamily = isWeChat(rawApp) || isWeChat(app) || isWeChatText(candidate.ownerName)
         let window = axWindow(matching: candidate)
-
-        app?.activate(options: [.activateAllWindows])
-        if let window {
-            focus(window: window, pid: candidate.pid)
-        }
 
         let name = app?.localizedName
         return GestureExecutionTarget(

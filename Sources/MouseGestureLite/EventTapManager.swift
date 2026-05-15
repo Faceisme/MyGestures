@@ -345,40 +345,94 @@ final class EventTapManager {
                 return
             }
 
-            let target = GestureTargetController.executionTarget(
-                at: targetPoint,
-                policy: store.preferences.gestureTargetPolicy,
+            resolveTargetAndExecute(
+                match: match,
+                shortcut: shortcut,
+                targetPoint: targetPoint,
                 frontmostApplicationAtGestureStart: frontmostApplicationAtGestureStart
             )
-            let delivery = target.usesProcessPosting ? "按进程投递" : "系统前台投递"
-            log("识别到 \(match.command.name)，距离=\(String(format: "%.3f", Double(match.distance)))，目标=\(target.displayName)，方式=\(delivery)，执行快捷键=\(shortcut.displayName)")
-            DispatchQueue.main.asyncAfter(deadline: .now() + target.deliveryDelay) {
-                if target.restoresOriginalFrontmostApplication {
-                    GestureTargetController.restoreFrontmostApplication(frontmostApplicationAtGestureStart)
-                }
-
-                if GestureTargetController.performDirectWindowCloseIfAvailable(for: target, shortcut: shortcut) {
-                    self.log("已通过辅助功能直接关闭目标窗口")
-                    return
-                }
-
-                if target.usesProcessPosting, let pid = target.pid {
-                    ShortcutSynthesizer.send(shortcut, toPid: pid)
-                } else {
-                    ShortcutSynthesizer.send(shortcut)
-                }
-
-                if target.restoresOriginalFrontmostApplication {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                        GestureTargetController.restoreFrontmostApplication(frontmostApplicationAtGestureStart)
-                    }
-                }
-            }
         } else {
             if let best {
                 log("未识别，最接近 \(best.command.name)，距离=\(String(format: "%.3f", Double(best.distance)))，阈值=\(threshold)")
             } else {
                 log("未识别，没有可用候选，点数=\(points.count)")
+            }
+        }
+    }
+
+    private func resolveTargetAndExecute(
+        match: GestureMatch,
+        shortcut: Shortcut,
+        targetPoint: CGPoint,
+        frontmostApplicationAtGestureStart: NSRunningApplication?
+    ) {
+        let policy = store.preferences.gestureTargetPolicy
+
+        switch policy {
+        case .activeWindow:
+            let target = GestureTargetController.executionTarget(
+                at: targetPoint,
+                policy: policy,
+                frontmostApplicationAtGestureStart: frontmostApplicationAtGestureStart
+            )
+            executeMatchedGesture(
+                match: match,
+                shortcut: shortcut,
+                target: target,
+                frontmostApplicationAtGestureStart: frontmostApplicationAtGestureStart
+            )
+
+        case .windowUnderPointer:
+            DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+                let target = GestureTargetController.executionTarget(
+                    at: targetPoint,
+                    policy: policy,
+                    frontmostApplicationAtGestureStart: nil
+                )
+
+                DispatchQueue.main.async { [weak self] in
+                    self?.executeMatchedGesture(
+                        match: match,
+                        shortcut: shortcut,
+                        target: target,
+                        frontmostApplicationAtGestureStart: frontmostApplicationAtGestureStart
+                    )
+                }
+            }
+        }
+    }
+
+    private func executeMatchedGesture(
+        match: GestureMatch,
+        shortcut: Shortcut,
+        target: GestureExecutionTarget,
+        frontmostApplicationAtGestureStart: NSRunningApplication?
+    ) {
+        GestureTargetController.prepareForExecution(target)
+
+        let delivery = target.usesProcessPosting ? "按进程投递" : "系统前台投递"
+        log("识别到 \(match.command.name)，距离=\(String(format: "%.3f", Double(match.distance)))，目标=\(target.displayName)，方式=\(delivery)，执行快捷键=\(shortcut.displayName)")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + target.deliveryDelay) { [weak self] in
+            if target.restoresOriginalFrontmostApplication {
+                GestureTargetController.restoreFrontmostApplication(frontmostApplicationAtGestureStart)
+            }
+
+            if GestureTargetController.performDirectWindowCloseIfAvailable(for: target, shortcut: shortcut) {
+                self?.log("已通过辅助功能直接关闭目标窗口")
+                return
+            }
+
+            if target.usesProcessPosting, let pid = target.pid {
+                ShortcutSynthesizer.send(shortcut, toPid: pid)
+            } else {
+                ShortcutSynthesizer.send(shortcut)
+            }
+
+            if target.restoresOriginalFrontmostApplication {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                    GestureTargetController.restoreFrontmostApplication(frontmostApplicationAtGestureStart)
+                }
             }
         }
     }

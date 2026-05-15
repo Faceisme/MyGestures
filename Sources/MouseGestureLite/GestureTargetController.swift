@@ -72,9 +72,9 @@ enum GestureTargetController {
     }
 
     private static func targetUnderPointer(at point: CGPoint) -> GestureExecutionTarget {
-        let accessibilityPoint = DisplayCoordinateConverter.eventLocationToAccessibilityPoint(point)
-        guard let element = elementAtPosition(accessibilityPoint) ?? fallbackElementAtOriginalPoint(point, accessibilityPoint: accessibilityPoint) else {
-            if let candidate = windowCandidate(at: accessibilityPoint) ?? fallbackWindowCandidateAtOriginalPoint(point, accessibilityPoint: accessibilityPoint) {
+        let candidatePoints = targetLookupPoints(for: point)
+        guard let element = firstElementAtPosition(candidatePoints) else {
+            if let candidate = windowCandidate(atAny: candidatePoints) {
                 return target(from: candidate)
             }
 
@@ -164,6 +164,24 @@ enum GestureTargetController {
         return result == .success
     }
 
+    private static func targetLookupPoints(for point: CGPoint) -> [CGPoint] {
+        let accessibilityPoint = DisplayCoordinateConverter.eventLocationToAccessibilityPoint(point)
+        guard point != accessibilityPoint else {
+            return [accessibilityPoint]
+        }
+
+        return [accessibilityPoint, point]
+    }
+
+    private static func firstElementAtPosition(_ points: [CGPoint]) -> AXUIElement? {
+        for point in points {
+            if let element = elementAtPosition(point) {
+                return element
+            }
+        }
+        return nil
+    }
+
     private static func elementAtPosition(_ point: CGPoint) -> AXUIElement? {
         let systemWide = AXUIElementCreateSystemWide()
         var element: AXUIElement?
@@ -180,20 +198,22 @@ enum GestureTargetController {
         return element
     }
 
-    private static func fallbackElementAtOriginalPoint(_ point: CGPoint, accessibilityPoint: CGPoint) -> AXUIElement? {
-        guard point != accessibilityPoint else {
-            return nil
-        }
-
-        return elementAtPosition(point)
-    }
-
-    private static func windowCandidate(at point: CGPoint) -> WindowCandidate? {
+    private static func windowCandidate(atAny points: [CGPoint]) -> WindowCandidate? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
 
+        for point in points {
+            if let candidate = windowCandidate(in: windowList, at: point) {
+                return candidate
+            }
+        }
+
+        return nil
+    }
+
+    private static func windowCandidate(in windowList: [[String: Any]], at point: CGPoint) -> WindowCandidate? {
         for info in windowList {
             guard let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue,
                   layer == 0,
@@ -220,14 +240,6 @@ enum GestureTargetController {
         return nil
     }
 
-    private static func fallbackWindowCandidateAtOriginalPoint(_ point: CGPoint, accessibilityPoint: CGPoint) -> WindowCandidate? {
-        guard point != accessibilityPoint else {
-            return nil
-        }
-
-        return windowCandidate(at: point)
-    }
-
     private static func processIdentifier(for element: AXUIElement) -> pid_t? {
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success else {
@@ -242,23 +254,66 @@ enum GestureTargetController {
             return nil
         }
 
-        let matches = windows.compactMap { window -> (AXUIElement, CGFloat)? in
+        var bestWindow: AXUIElement?
+        var bestDistance = CGFloat.greatestFiniteMagnitude
+
+        for window in windows {
             guard let frame = frame(of: window) else {
-                return nil
+                continue
             }
-            return (window, frameDistance(frame, candidate.bounds))
+
+            let distance = frameDistance(frame, candidate.bounds)
+            if distance < bestDistance {
+                bestDistance = distance
+                bestWindow = window
+
+                if distance == 0 {
+                    break
+                }
+            }
         }
 
-        if let best = matches.min(by: { $0.1 < $1.1 }), best.1 <= 80 {
-            return best.0
-        }
-
-        return nil
+        return bestDistance <= 80 ? bestWindow : nil
     }
 
     private static func frame(of window: AXUIElement) -> CGRect? {
+        if let frame = frameFromMultipleAttributes(of: window) {
+            return frame
+        }
+
         guard let position = pointAttribute(kAXPositionAttribute, of: window),
               let size = sizeAttribute(kAXSizeAttribute, of: window) else {
+            return nil
+        }
+
+        return CGRect(origin: position, size: size)
+    }
+
+    private static func frameFromMultipleAttributes(of window: AXUIElement) -> CGRect? {
+        let attributes = [
+            kAXPositionAttribute as CFString,
+            kAXSizeAttribute as CFString
+        ] as CFArray
+        var values: CFArray?
+        let result = AXUIElementCopyMultipleAttributeValues(
+            window,
+            attributes,
+            AXCopyMultipleAttributeOptions(rawValue: 0),
+            &values
+        )
+
+        guard result == .success,
+              let values = values as? [Any],
+              values.count == 2,
+              CFGetTypeID(values[0] as CFTypeRef) == AXValueGetTypeID(),
+              CFGetTypeID(values[1] as CFTypeRef) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue((values[0] as! AXValue), .cgPoint, &position),
+              AXValueGetValue((values[1] as! AXValue), .cgSize, &size) else {
             return nil
         }
 

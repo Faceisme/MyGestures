@@ -12,7 +12,7 @@ final class GestureCaptureView: NSView {
 
     private var points: [CGPoint] = [] {
         didSet {
-            needsDisplay = true
+            invalidateForPointChange(from: oldValue, to: points)
         }
     }
 
@@ -62,6 +62,25 @@ final class GestureCaptureView: NSView {
         if points.count >= 2 {
             onStrokeFinished?(points)
         }
+    }
+
+    private func invalidateForPointChange(from oldPoints: [CGPoint], to newPoints: [CGPoint]) {
+        guard !oldPoints.isEmpty,
+              !newPoints.isEmpty,
+              newPoints.count >= oldPoints.count,
+              let previous = oldPoints.last,
+              let current = newPoints.last else {
+            needsDisplay = true
+            return
+        }
+
+        let dirtyRect = NSRect(
+            x: min(previous.x, current.x),
+            y: min(previous.y, current.y),
+            width: abs(previous.x - current.x) + 1,
+            height: abs(previous.y - current.y) + 1
+        ).insetBy(dx: -10, dy: -10)
+        setNeedsDisplay(dirtyRect)
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -135,10 +154,18 @@ final class GestureCaptureView: NSView {
             return rawPoints
         }
 
-        let minX = rawPoints.map(\.x).min() ?? 0
-        let maxX = rawPoints.map(\.x).max() ?? 0
-        let minY = rawPoints.map(\.y).min() ?? 0
-        let maxY = rawPoints.map(\.y).max() ?? 0
+        var minX = rawPoints[0].x
+        var maxX = rawPoints[0].x
+        var minY = rawPoints[0].y
+        var maxY = rawPoints[0].y
+
+        for point in rawPoints.dropFirst() {
+            minX = min(minX, point.x)
+            maxX = max(maxX, point.x)
+            minY = min(minY, point.y)
+            maxY = max(maxY, point.y)
+        }
+
         let width = max(maxX - minX, 1)
         let height = max(maxY - minY, 1)
         let drawRect = bounds.insetBy(dx: 34, dy: 34)

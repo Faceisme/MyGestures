@@ -332,11 +332,10 @@ final class EventTapManager {
         frontmostApplicationAtGestureStart: NSRunningApplication?
     ) {
         let threshold = CGFloat(store.preferences.recognitionThreshold)
-        let match = recognizer.bestMatch(
-            points: points,
-            commands: store.gestures,
-            threshold: threshold
-        )
+        let best = recognizer.bestCandidate(points: points, commands: store.gestures)
+        let match = best.flatMap { candidate in
+            candidate.distance <= threshold ? candidate : nil
+        }
 
         onGestureMatch?(match)
 
@@ -376,7 +375,6 @@ final class EventTapManager {
                 }
             }
         } else {
-            let best = recognizer.bestCandidate(points: points, commands: store.gestures)
             if let best {
                 log("未识别，最接近 \(best.command.name)，距离=\(String(format: "%.3f", Double(best.distance)))，阈值=\(threshold)")
             } else {
@@ -484,21 +482,15 @@ final class EventTapManager {
     }
 
     private func showOverlay(points: [CGPoint]) {
-        DispatchQueue.main.async { [overlay] in
-            overlay.show(points: points)
-        }
+        overlay.show(points: points)
     }
 
     private func updateOverlay(points: [CGPoint]) {
-        DispatchQueue.main.async { [overlay] in
-            overlay.update(points: points)
-        }
+        overlay.update(points: points)
     }
 
     private func hideOverlay() {
-        DispatchQueue.main.async { [overlay] in
-            overlay.hide()
-        }
+        overlay.hide()
     }
 
     private func syncState<T>(_ work: () -> T) -> T {

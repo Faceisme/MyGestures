@@ -60,49 +60,52 @@ final class GestureRecognizer {
     }
 
     private func resample(_ points: [CGPoint], targetCount: Int) -> [CGPoint] {
+        guard let first = points.first else {
+            return []
+        }
+
+        guard targetCount > 1 else {
+            return [first]
+        }
+
         let totalLength = pathLength(points)
         guard totalLength > 0 else {
-            return Array(repeating: points[0], count: targetCount)
+            return Array(repeating: first, count: targetCount)
         }
 
         let interval = totalLength / CGFloat(targetCount - 1)
-        var distanceSoFar: CGFloat = 0
-        var source = points
-        var result = [source[0]]
-        var index = 1
+        var result = [first]
+        result.reserveCapacity(targetCount)
 
-        while index < source.count {
-            let previous = source[index - 1]
-            let current = source[index]
-            let segmentLength = distance(previous, current)
+        var accumulated: CGFloat = 0
+        var segmentStart = first
 
-            if segmentLength == 0 {
-                index += 1
-                continue
-            }
+        for segmentEnd in points.dropFirst() {
+            var remainingDistance = distance(segmentStart, segmentEnd)
 
-            if distanceSoFar + segmentLength >= interval {
-                let ratio = (interval - distanceSoFar) / segmentLength
+            while remainingDistance > 0, accumulated + remainingDistance >= interval {
+                let needed = interval - accumulated
+                let ratio = needed / remainingDistance
                 let point = CGPoint(
-                    x: previous.x + ratio * (current.x - previous.x),
-                    y: previous.y + ratio * (current.y - previous.y)
+                    x: segmentStart.x + ratio * (segmentEnd.x - segmentStart.x),
+                    y: segmentStart.y + ratio * (segmentEnd.y - segmentStart.y)
                 )
                 result.append(point)
-                source.insert(point, at: index)
-                distanceSoFar = 0
-                index += 1
-            } else {
-                distanceSoFar += segmentLength
-                index += 1
+                if result.count == targetCount {
+                    return result
+                }
+
+                segmentStart = point
+                remainingDistance = distance(segmentStart, segmentEnd)
+                accumulated = 0
             }
+
+            accumulated += remainingDistance
+            segmentStart = segmentEnd
         }
 
         while result.count < targetCount {
-            result.append(source.last ?? result.last ?? .zero)
-        }
-
-        if result.count > targetCount {
-            result = Array(result.prefix(targetCount))
+            result.append(points.last ?? result.last ?? .zero)
         }
 
         return result

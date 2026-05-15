@@ -9,7 +9,7 @@ final class GestureOverlayController {
     private let minimumRenderInterval: CFTimeInterval = 1.0 / 120.0
 
     private var pendingPoints: [CGPoint]?
-    private var renderScheduled = false
+    private var hasPendingRender = false
     private var renderGeneration = 0
     private var lastRenderTime: CFTimeInterval = 0
 
@@ -30,7 +30,7 @@ final class GestureOverlayController {
         }
 
         DispatchQueue.main.async { [weak self] in
-            self?.renderPendingPoints(generation: generation)
+            self?.schedulePendingRender(generation: generation)
         }
     }
 
@@ -75,11 +75,11 @@ final class GestureOverlayController {
         defer { renderLock.unlock() }
 
         pendingPoints = points
-        guard !renderScheduled else {
+        guard !hasPendingRender else {
             return nil
         }
 
-        renderScheduled = true
+        hasPendingRender = true
         return renderGeneration
     }
 
@@ -89,7 +89,7 @@ final class GestureOverlayController {
 
         renderGeneration += 1
         pendingPoints = nil
-        renderScheduled = false
+        hasPendingRender = false
         return renderGeneration
     }
 
@@ -100,20 +100,19 @@ final class GestureOverlayController {
         return renderGeneration == generation
     }
 
-    private func renderPendingPoints(generation: Int) {
+    private func schedulePendingRender(generation: Int) {
         guard isCurrentGeneration(generation) else {
             return
         }
 
         let now = CACurrentMediaTime()
-        let remainingInterval = minimumRenderInterval - (now - lastRenderTime)
-        if remainingInterval > 0 {
-            DispatchQueue.main.asyncAfter(deadline: .now() + remainingInterval) { [weak self] in
-                self?.renderPendingPoints(generation: generation)
-            }
-            return
+        let delay = max(0, minimumRenderInterval - (now - lastRenderTime))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.flushPendingRender(generation: generation)
         }
+    }
 
+    private func flushPendingRender(generation: Int) {
         guard let points = consumePendingPoints(generation: generation) else {
             return
         }
@@ -133,7 +132,7 @@ final class GestureOverlayController {
 
         let points = pendingPoints
         pendingPoints = nil
-        renderScheduled = false
+        hasPendingRender = false
         return points
     }
 
@@ -148,6 +147,9 @@ private final class GestureOverlayView: NSView {
     private let strokeLayer = CAShapeLayer()
     private let dotOuterLayer = CAShapeLayer()
     private let dotInnerLayer = CAShapeLayer()
+    private var currentPath = CGMutablePath()
+    private var renderedPointCount = 0
+    private var renderedOrigin: CGPoint?
 
     var points: [CGPoint] = [] {
         didSet {
@@ -221,6 +223,7 @@ private final class GestureOverlayView: NSView {
         }
 
         guard points.count >= 2 else {
+            resetRenderedPath()
             strokeLayer.path = nil
             dotOuterLayer.path = nil
             dotInnerLayer.path = nil
@@ -228,15 +231,48 @@ private final class GestureOverlayView: NSView {
         }
 
         let origin = window?.frame.origin ?? .zero
-        let path = CGMutablePath()
-        path.move(to: localPoint(for: points[0], origin: origin))
-
-        for point in points.dropFirst() {
-            path.addLine(to: localPoint(for: point, origin: origin))
+        if shouldRebuildPath(origin: origin) {
+            rebuildPath(origin: origin)
+        } else {
+            appendNewPathSegments(origin: origin)
         }
 
-        strokeLayer.path = path
+        strokeLayer.path = currentPath
 
+        updateDotPath(origin: origin)
+    }
+
+    private func shouldRebuildPath(origin: CGPoint) -> Bool {
+        renderedPointCount == 0 ||
+            points.count < renderedPointCount ||
+            renderedOrigin != origin
+    }
+
+    private func rebuildPath(origin: CGPoint) {
+        currentPath = CGMutablePath()
+        currentPath.move(to: localPoint(for: points[0], origin: origin))
+
+        for point in points.dropFirst() {
+            currentPath.addLine(to: localPoint(for: point, origin: origin))
+        }
+
+        renderedPointCount = points.count
+        renderedOrigin = origin
+    }
+
+    private func appendNewPathSegments(origin: CGPoint) {
+        guard renderedPointCount < points.count else {
+            return
+        }
+
+        for index in renderedPointCount..<points.count {
+            currentPath.addLine(to: localPoint(for: points[index], origin: origin))
+        }
+
+        renderedPointCount = points.count
+    }
+
+    private func updateDotPath(origin: CGPoint) {
         guard let last = points.last else {
             dotOuterLayer.path = nil
             dotInnerLayer.path = nil
@@ -247,6 +283,12 @@ private final class GestureOverlayView: NSView {
         let dotRect = CGRect(x: center.x - 5, y: center.y - 5, width: 10, height: 10)
         dotOuterLayer.path = CGPath(ellipseIn: dotRect.insetBy(dx: -2, dy: -2), transform: nil)
         dotInnerLayer.path = CGPath(ellipseIn: dotRect, transform: nil)
+    }
+
+    private func resetRenderedPath() {
+        currentPath = CGMutablePath()
+        renderedPointCount = 0
+        renderedOrigin = nil
     }
 
     private func localPoint(for point: CGPoint, origin: CGPoint) -> CGPoint {

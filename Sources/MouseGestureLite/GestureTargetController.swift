@@ -99,7 +99,7 @@ enum GestureTargetController {
     }
 
     static func setFrame(_ frame: CGRect, ofWindow window: AXUIElement) -> Bool {
-        setPosition(frame.origin, ofWindow: window) && setSize(frame.size, ofWindow: window)
+        setSize(frame.size, ofWindow: window) && setPosition(frame.origin, ofWindow: window)
     }
 
     static func maximizeWindowUnderPointer(at point: CGPoint) {

@@ -37,6 +37,8 @@ final class EventTapManager {
         var mode: WindowDragMode
         var window: AXUIElement
         var startPointer: CGPoint
+        var startDragPointer: CGPoint
+        var usesConvertedDragPointer: Bool
         var startFrame: CGRect
         var horizontalEdge: ResizeEdge
         var verticalEdge: ResizeEdge
@@ -434,17 +436,30 @@ final class EventTapManager {
     }
 
     private func flushWindowDragUpdates() {
-        while true {
-            windowControlLock.lock()
-            guard let update = pendingWindowDragUpdate else {
-                windowDragUpdateScheduled = false
-                windowControlLock.unlock()
-                return
-            }
-            pendingWindowDragUpdate = nil
+        windowControlLock.lock()
+        guard let update = pendingWindowDragUpdate else {
+            windowDragUpdateScheduled = false
             windowControlLock.unlock()
+            return
+        }
+        pendingWindowDragUpdate = nil
+        windowControlLock.unlock()
 
-            _ = updateWindowDrag(mode: update.mode, at: update.location)
+        _ = updateWindowDrag(mode: update.mode, at: update.location)
+
+        windowControlLock.lock()
+        let shouldScheduleNextFlush = pendingWindowDragUpdate != nil
+        if !shouldScheduleNextFlush {
+            windowDragUpdateScheduled = false
+        }
+        windowControlLock.unlock()
+
+        guard shouldScheduleNextFlush else {
+            return
+        }
+
+        windowControlQueue.async { [weak self] in
+            self?.flushWindowDragUpdates()
         }
     }
 
@@ -467,9 +482,12 @@ final class EventTapManager {
             return false
         }
 
-        let currentPointer = location
-        let dx = currentPointer.x - session.startPointer.x
-        let dy = currentPointer.y - session.startPointer.y
+        let currentPointer = windowDragPoint(
+            from: location,
+            usesConvertedPointer: session.usesConvertedDragPointer
+        )
+        let dx = currentPointer.x - session.startDragPointer.x
+        let dy = currentPointer.y - session.startDragPointer.y
 
         switch session.mode {
         case .move:
@@ -492,14 +510,52 @@ final class EventTapManager {
         }
 
         let pointer = location
+        let dragPoint = initialWindowDragPoint(for: location, in: frame)
         return WindowDragSession(
             mode: mode,
             window: window,
             startPointer: pointer,
+            startDragPointer: dragPoint.point,
+            usesConvertedDragPointer: dragPoint.usesConvertedPointer,
             startFrame: frame,
-            horizontalEdge: pointer.x < frame.midX ? .min : .max,
-            verticalEdge: pointer.y < frame.midY ? .min : .max
+            horizontalEdge: dragPoint.point.x < frame.midX ? .min : .max,
+            verticalEdge: dragPoint.point.y < frame.midY ? .min : .max
         )
+    }
+
+    private func initialWindowDragPoint(
+        for location: CGPoint,
+        in frame: CGRect
+    ) -> (point: CGPoint, usesConvertedPointer: Bool) {
+        if frame.contains(location) {
+            return (location, false)
+        }
+
+        let convertedPoint = DisplayCoordinateConverter.eventLocationToAccessibilityPoint(location)
+        if frame.contains(convertedPoint) {
+            return (convertedPoint, true)
+        }
+
+        let rawDistance = distance(from: location, to: frame)
+        let convertedDistance = distance(from: convertedPoint, to: frame)
+        return rawDistance <= convertedDistance
+            ? (location, false)
+            : (convertedPoint, true)
+    }
+
+    private func windowDragPoint(
+        from location: CGPoint,
+        usesConvertedPointer: Bool
+    ) -> CGPoint {
+        usesConvertedPointer
+            ? DisplayCoordinateConverter.eventLocationToAccessibilityPoint(location)
+            : location
+    }
+
+    private func distance(from point: CGPoint, to rect: CGRect) -> CGFloat {
+        let clampedX = min(max(point.x, rect.minX), rect.maxX)
+        let clampedY = min(max(point.y, rect.minY), rect.maxY)
+        return hypot(point.x - clampedX, point.y - clampedY)
     }
 
     private func resizedFrame(from session: WindowDragSession, dx: CGFloat, dy: CGFloat) -> CGRect {
@@ -509,11 +565,13 @@ final class EventTapManager {
 
         switch session.horizontalEdge {
         case .min:
-            origin.x = session.startFrame.origin.x + dx
-            size.width = session.startFrame.width - dx
-            if size.width < minimumSize.width {
-                origin.x -= minimumSize.width - size.width
+            let newWidth = session.startFrame.width - dx
+            if newWidth < minimumSize.width {
+                origin.x = session.startFrame.maxX - minimumSize.width
                 size.width = minimumSize.width
+            } else {
+                origin.x = session.startFrame.origin.x + dx
+                size.width = newWidth
             }
         case .max:
             size.width = max(minimumSize.width, session.startFrame.width + dx)
@@ -521,17 +579,59 @@ final class EventTapManager {
 
         switch session.verticalEdge {
         case .min:
-            origin.y = session.startFrame.origin.y + dy
-            size.height = session.startFrame.height - dy
-            if size.height < minimumSize.height {
-                origin.y -= minimumSize.height - size.height
+            let newHeight = session.startFrame.height - dy
+            if newHeight < minimumSize.height {
+                origin.y = session.startFrame.maxY - minimumSize.height
                 size.height = minimumSize.height
+            } else {
+                origin.y = session.startFrame.origin.y + dy
+                size.height = newHeight
             }
         case .max:
             size.height = max(minimumSize.height, session.startFrame.height + dy)
         }
 
-        return CGRect(origin: origin, size: size)
+        var result = CGRect(origin: origin, size: size)
+        let screenFrame = DisplayCoordinateConverter.visibleAccessibilityFrame(
+            containingEventLocation: session.startPointer
+        )
+        guard !screenFrame.isEmpty else {
+            return result
+        }
+
+        if result.maxX > screenFrame.maxX {
+            if session.horizontalEdge == .max {
+                result.size.width = screenFrame.maxX - result.origin.x
+            } else {
+                result.origin.x = screenFrame.maxX - result.size.width
+            }
+        }
+
+        if result.minX < screenFrame.minX {
+            result.origin.x = screenFrame.minX
+            if session.horizontalEdge == .min {
+                result.size.width = session.startFrame.maxX - screenFrame.minX
+            }
+        }
+
+        if result.maxY > screenFrame.maxY {
+            if session.verticalEdge == .max {
+                result.size.height = screenFrame.maxY - result.origin.y
+            } else {
+                result.origin.y = screenFrame.maxY - result.size.height
+            }
+        }
+
+        if result.minY < screenFrame.minY {
+            result.origin.y = screenFrame.minY
+            if session.verticalEdge == .min {
+                result.size.height = session.startFrame.maxY - screenFrame.minY
+            }
+        }
+
+        result.size.width = max(result.size.width, minimumSize.width)
+        result.size.height = max(result.size.height, minimumSize.height)
+        return result
     }
 
     private func windowDragMode(for flags: CGEventFlags) -> WindowDragMode? {

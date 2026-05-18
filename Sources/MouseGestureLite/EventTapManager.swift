@@ -42,11 +42,18 @@ final class EventTapManager {
         var verticalEdge: ResizeEdge
     }
 
+    private struct WindowDragUpdate {
+        var mode: WindowDragMode
+        var location: CGPoint
+    }
+
     private let store: GestureStore
     private let recognizer = GestureRecognizer()
     private let overlay = GestureOverlayController()
     private let stateQueue = DispatchQueue(label: "com.face.mygestures.eventtap.state", qos: .userInteractive)
     private let stateQueueKey = DispatchSpecificKey<Void>()
+    private let windowControlQueue = DispatchQueue(label: "com.face.mygestures.window-control", qos: .userInteractive)
+    private let windowControlLock = NSLock()
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -63,6 +70,8 @@ final class EventTapManager {
     private var frontmostApplicationAtGestureStart: NSRunningApplication?
     private var lastFrontmostApplication: NSRunningApplication?
     private var windowDragSession: WindowDragSession?
+    private var pendingWindowDragUpdate: WindowDragUpdate?
+    private var windowDragUpdateScheduled = false
     private var activationObserver: NSObjectProtocol?
     private var storeObserver: NSObjectProtocol?
     private var preferences: AppPreferences
@@ -131,9 +140,6 @@ final class EventTapManager {
             | eventMask(for: .rightMouseDragged)
             | eventMask(for: .rightMouseUp)
             | eventMask(for: .mouseMoved)
-            | eventMask(for: .leftMouseDown)
-            | eventMask(for: .leftMouseDragged)
-            | eventMask(for: .leftMouseUp)
             | eventMask(for: .flagsChanged)
             | eventMask(for: .keyDown)
 
@@ -192,7 +198,7 @@ final class EventTapManager {
             points = []
             displayPoints = []
             frontmostApplicationAtGestureStart = nil
-            windowDragSession = nil
+            resetWindowDragSession()
             startPoint = .zero
             lastPoint = .zero
             let runLoop = tapRunLoop
@@ -232,6 +238,10 @@ final class EventTapManager {
         guard isRightMouseEvent(type) else {
             if type == .keyDown,
                event.getIntegerValueField(.eventSourceUserData) == ShortcutSynthesizer.syntheticEventMarker {
+                return Unmanaged.passUnretained(event)
+            }
+            if type == .mouseMoved,
+               ModifierFormatter.normalizedRawValue(from: event.flags) == 0 {
                 return Unmanaged.passUnretained(event)
             }
             if isWindowControlEvent(type) {
@@ -371,26 +381,23 @@ final class EventTapManager {
             return handleWindowShortcutLocked(event: event)
         }
 
-        if type == .leftMouseUp {
-            let shouldConsume = windowDragSession != nil
-            windowDragSession = nil
-            return shouldConsume ? nil : Unmanaged.passUnretained(event)
+        if type == .flagsChanged {
+            if windowDragMode(for: event.flags) == nil {
+                resetWindowDragSession()
+            }
+            return Unmanaged.passUnretained(event)
         }
 
         guard let mode = windowDragMode(for: event.flags) else {
-            windowDragSession = nil
+            resetWindowDragSession()
             return Unmanaged.passUnretained(event)
         }
 
-        guard type == .mouseMoved || type == .leftMouseDown || type == .leftMouseDragged else {
+        guard type == .mouseMoved else {
             return Unmanaged.passUnretained(event)
         }
 
-        let didUpdateWindow = updateWindowDrag(mode: mode, at: event.location)
-        if type == .leftMouseDown || type == .leftMouseDragged {
-            return didUpdateWindow ? nil : Unmanaged.passUnretained(event)
-        }
-
+        enqueueWindowDragUpdate(mode: mode, at: event.location)
         return Unmanaged.passUnretained(event)
     }
 
@@ -408,6 +415,49 @@ final class EventTapManager {
         return nil
     }
 
+    private func enqueueWindowDragUpdate(mode: WindowDragMode, at location: CGPoint) {
+        windowControlLock.lock()
+        pendingWindowDragUpdate = WindowDragUpdate(mode: mode, location: location)
+        let shouldSchedule = !windowDragUpdateScheduled
+        if shouldSchedule {
+            windowDragUpdateScheduled = true
+        }
+        windowControlLock.unlock()
+
+        guard shouldSchedule else {
+            return
+        }
+
+        windowControlQueue.async { [weak self] in
+            self?.flushWindowDragUpdates()
+        }
+    }
+
+    private func flushWindowDragUpdates() {
+        while true {
+            windowControlLock.lock()
+            guard let update = pendingWindowDragUpdate else {
+                windowDragUpdateScheduled = false
+                windowControlLock.unlock()
+                return
+            }
+            pendingWindowDragUpdate = nil
+            windowControlLock.unlock()
+
+            _ = updateWindowDrag(mode: update.mode, at: update.location)
+        }
+    }
+
+    private func resetWindowDragSession() {
+        windowControlLock.lock()
+        pendingWindowDragUpdate = nil
+        windowControlLock.unlock()
+
+        windowControlQueue.async { [weak self] in
+            self?.windowDragSession = nil
+        }
+    }
+
     private func updateWindowDrag(mode: WindowDragMode, at location: CGPoint) -> Bool {
         if windowDragSession?.mode != mode {
             windowDragSession = beginWindowDrag(mode: mode, at: location)
@@ -417,7 +467,7 @@ final class EventTapManager {
             return false
         }
 
-        let currentPointer = DisplayCoordinateConverter.eventLocationToAccessibilityPoint(location)
+        let currentPointer = location
         let dx = currentPointer.x - session.startPointer.x
         let dy = currentPointer.y - session.startPointer.y
 
@@ -441,7 +491,7 @@ final class EventTapManager {
             return nil
         }
 
-        let pointer = DisplayCoordinateConverter.eventLocationToAccessibilityPoint(location)
+        let pointer = location
         return WindowDragSession(
             mode: mode,
             window: window,
@@ -737,9 +787,6 @@ final class EventTapManager {
 
     private func isWindowControlEvent(_ type: CGEventType) -> Bool {
         type == .mouseMoved ||
-            type == .leftMouseDown ||
-            type == .leftMouseDragged ||
-            type == .leftMouseUp ||
             type == .flagsChanged ||
             type == .keyDown
     }

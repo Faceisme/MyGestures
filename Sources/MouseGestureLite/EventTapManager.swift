@@ -40,6 +40,7 @@ final class EventTapManager {
         var startDragPointer: CGPoint
         var usesConvertedDragPointer: Bool
         var startFrame: CGRect
+        var screenFrame: CGRect
         var horizontalEdge: ResizeEdge
         var verticalEdge: ResizeEdge
     }
@@ -74,17 +75,23 @@ final class EventTapManager {
     private var windowDragSession: WindowDragSession?
     private var pendingWindowDragUpdate: WindowDragUpdate?
     private var windowDragUpdateScheduled = false
+    private var windowMoveModifierFlags: UInt64
+    private var windowResizeModifierFlags: UInt64
     private var activationObserver: NSObjectProtocol?
     private var storeObserver: NSObjectProtocol?
     private var preferences: AppPreferences
 
     private let movementThreshold: CGFloat = 10
+    private let minimumRecordedPointDistance: CGFloat = 2
+    private let maximumGesturePointCount = 512
     private let safetyTimeout: TimeInterval = 8
     private let syntheticMarker: Int64 = 0x4D474C524550
 
     init(store: GestureStore = .shared) {
         self.store = store
         preferences = store.preferences
+        windowMoveModifierFlags = preferences.windowMoveModifierFlags
+        windowResizeModifierFlags = preferences.windowResizeModifierFlags
         stateQueue.setSpecific(key: stateQueueKey, value: ())
         lastFrontmostApplication = NSWorkspace.shared.frontmostApplication
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -110,6 +117,7 @@ final class EventTapManager {
         ) { [weak self] _ in
             guard let self else { return }
             let preferences = store.preferences
+            self.updateWindowControlModifierSnapshot(from: preferences)
             self.stateQueue.async {
                 self.preferences = preferences
             }
@@ -187,6 +195,7 @@ final class EventTapManager {
         ready.wait()
 
         CGEvent.tapEnable(tap: tap, enable: true)
+        prewarmWindowControlCaches()
         log("主动右键拦截已启动。普通右键会补发，右键拖动会进入手势模式。")
         onStatusChange?("监听中（主动拦截）")
         return true
@@ -244,6 +253,10 @@ final class EventTapManager {
             }
             if type == .mouseMoved,
                ModifierFormatter.normalizedRawValue(from: event.flags) == 0 {
+                return Unmanaged.passUnretained(event)
+            }
+            if type == .mouseMoved,
+               windowDragModeSnapshot(for: event.flags) == nil {
                 return Unmanaged.passUnretained(event)
             }
             if isWindowControlEvent(type) {
@@ -384,7 +397,9 @@ final class EventTapManager {
         }
 
         if type == .flagsChanged {
-            if windowDragMode(for: event.flags) == nil {
+            if let mode = windowDragMode(for: event.flags) {
+                prepareWindowDragSession(mode: mode, at: event.location)
+            } else {
                 resetWindowDragSession()
             }
             return Unmanaged.passUnretained(event)
@@ -401,6 +416,38 @@ final class EventTapManager {
 
         enqueueWindowDragUpdate(mode: mode, at: event.location)
         return Unmanaged.passUnretained(event)
+    }
+
+    private func prewarmWindowControlCaches() {
+        DispatchQueue.global(qos: .utility).async {
+            DisplayCoordinateConverter.prewarm()
+        }
+    }
+
+    private func updateWindowControlModifierSnapshot(from preferences: AppPreferences) {
+        windowControlLock.lock()
+        windowMoveModifierFlags = preferences.windowMoveModifierFlags
+        windowResizeModifierFlags = preferences.windowResizeModifierFlags
+        windowControlLock.unlock()
+    }
+
+    private func windowDragModeSnapshot(for flags: CGEventFlags) -> WindowDragMode? {
+        let rawValue = ModifierFormatter.normalizedRawValue(from: flags)
+
+        windowControlLock.lock()
+        let resizeFlags = windowResizeModifierFlags
+        let moveFlags = windowMoveModifierFlags
+        windowControlLock.unlock()
+
+        if resizeFlags != 0, rawValue == resizeFlags {
+            return .resize
+        }
+
+        if moveFlags != 0, rawValue == moveFlags {
+            return .move
+        }
+
+        return nil
     }
 
     private func handleWindowShortcutLocked(event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -473,6 +520,15 @@ final class EventTapManager {
         }
     }
 
+    private func prepareWindowDragSession(mode: WindowDragMode, at location: CGPoint) {
+        windowControlQueue.async { [weak self] in
+            guard let self else { return }
+            if self.windowDragSession?.mode != mode {
+                self.windowDragSession = self.beginWindowDrag(mode: mode, at: location)
+            }
+        }
+    }
+
     private func updateWindowDrag(mode: WindowDragMode, at location: CGPoint) -> Bool {
         if windowDragSession?.mode != mode {
             windowDragSession = beginWindowDrag(mode: mode, at: location)
@@ -511,6 +567,7 @@ final class EventTapManager {
 
         let pointer = location
         let dragPoint = initialWindowDragPoint(for: location, in: frame)
+        let screenFrame = DisplayCoordinateConverter.visibleAccessibilityFrame(containingEventLocation: pointer)
         return WindowDragSession(
             mode: mode,
             window: window,
@@ -518,6 +575,7 @@ final class EventTapManager {
             startDragPointer: dragPoint.point,
             usesConvertedDragPointer: dragPoint.usesConvertedPointer,
             startFrame: frame,
+            screenFrame: screenFrame,
             horizontalEdge: dragPoint.point.x < frame.midX ? .min : .max,
             verticalEdge: dragPoint.point.y < frame.midY ? .min : .max
         )
@@ -592,9 +650,7 @@ final class EventTapManager {
         }
 
         var result = CGRect(origin: origin, size: size)
-        let screenFrame = DisplayCoordinateConverter.visibleAccessibilityFrame(
-            containingEventLocation: session.startPointer
-        )
+        let screenFrame = session.screenFrame
         guard !screenFrame.isEmpty else {
             return result
         }
@@ -792,8 +848,24 @@ final class EventTapManager {
 
     private func appendPoint(_ point: CGPoint) {
         lastPoint = point
-        points.append(point)
-        displayPoints.append(DisplayCoordinateConverter.eventLocationToOverlayPoint(point))
+        guard let previousPoint = points.last else {
+            points = [point]
+            displayPoints = [DisplayCoordinateConverter.eventLocationToOverlayPoint(point)]
+            return
+        }
+
+        guard distance(previousPoint, point) >= minimumRecordedPointDistance else {
+            return
+        }
+
+        let displayPoint = DisplayCoordinateConverter.eventLocationToOverlayPoint(point)
+        if points.count >= maximumGesturePointCount {
+            points[points.count - 1] = point
+            displayPoints[displayPoints.count - 1] = displayPoint
+        } else {
+            points.append(point)
+            displayPoints.append(displayPoint)
+        }
     }
 
     private func resetTracking(reason: String) {
@@ -803,7 +875,7 @@ final class EventTapManager {
         points = []
         displayPoints = []
         frontmostApplicationAtGestureStart = nil
-        windowDragSession = nil
+        resetWindowDragSession()
         startPoint = .zero
         lastPoint = .zero
         hideOverlay()

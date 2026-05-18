@@ -28,6 +28,11 @@ enum DisplayCoordinateConverter {
         return screenFrames.first ?? .zero
     }
 
+    static func prewarm() {
+        _ = desktopFrame()
+        _ = visibleAccessibilityFrame(containingEventLocation: .zero)
+    }
+
     private static func eventLocationToTopLeftDesktopPoint(_ point: CGPoint) -> CGPoint {
         let desktopFrame = desktopFrame()
         guard !desktopFrame.isEmpty else {

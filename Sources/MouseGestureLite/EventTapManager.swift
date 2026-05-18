@@ -23,6 +23,25 @@ final class EventTapManager {
         case cleanupAwaitingUp = "保险重置，等待松开"
     }
 
+    private enum WindowDragMode {
+        case move
+        case resize
+    }
+
+    private enum ResizeEdge {
+        case min
+        case max
+    }
+
+    private struct WindowDragSession {
+        var mode: WindowDragMode
+        var window: AXUIElement
+        var startPointer: CGPoint
+        var startFrame: CGRect
+        var horizontalEdge: ResizeEdge
+        var verticalEdge: ResizeEdge
+    }
+
     private let store: GestureStore
     private let recognizer = GestureRecognizer()
     private let overlay = GestureOverlayController()
@@ -43,6 +62,7 @@ final class EventTapManager {
     private var safetyToken: UUID?
     private var frontmostApplicationAtGestureStart: NSRunningApplication?
     private var lastFrontmostApplication: NSRunningApplication?
+    private var windowDragSession: WindowDragSession?
     private var activationObserver: NSObjectProtocol?
     private var storeObserver: NSObjectProtocol?
     private var preferences: AppPreferences
@@ -110,6 +130,12 @@ final class EventTapManager {
         let mask = eventMask(for: .rightMouseDown)
             | eventMask(for: .rightMouseDragged)
             | eventMask(for: .rightMouseUp)
+            | eventMask(for: .mouseMoved)
+            | eventMask(for: .leftMouseDown)
+            | eventMask(for: .leftMouseDragged)
+            | eventMask(for: .leftMouseUp)
+            | eventMask(for: .flagsChanged)
+            | eventMask(for: .keyDown)
 
         guard let tap = CGEvent.tapCreate(
             tap: .cghidEventTap,
@@ -166,6 +192,7 @@ final class EventTapManager {
             points = []
             displayPoints = []
             frontmostApplicationAtGestureStart = nil
+            windowDragSession = nil
             startPoint = .zero
             lastPoint = .zero
             let runLoop = tapRunLoop
@@ -203,6 +230,15 @@ final class EventTapManager {
         }
 
         guard isRightMouseEvent(type) else {
+            if type == .keyDown,
+               event.getIntegerValueField(.eventSourceUserData) == ShortcutSynthesizer.syntheticEventMarker {
+                return Unmanaged.passUnretained(event)
+            }
+            if isWindowControlEvent(type) {
+                return syncState {
+                    handleWindowControlLocked(type: type, event: event)
+                }
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -324,6 +360,143 @@ final class EventTapManager {
         case .idle:
             return Unmanaged.passUnretained(event)
         }
+    }
+
+    private func handleWindowControlLocked(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if state != .idle {
+            return Unmanaged.passUnretained(event)
+        }
+
+        if type == .keyDown {
+            return handleWindowShortcutLocked(event: event)
+        }
+
+        if type == .leftMouseUp {
+            let shouldConsume = windowDragSession != nil
+            windowDragSession = nil
+            return shouldConsume ? nil : Unmanaged.passUnretained(event)
+        }
+
+        guard let mode = windowDragMode(for: event.flags) else {
+            windowDragSession = nil
+            return Unmanaged.passUnretained(event)
+        }
+
+        guard type == .mouseMoved || type == .leftMouseDown || type == .leftMouseDragged else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let didUpdateWindow = updateWindowDrag(mode: mode, at: event.location)
+        if type == .leftMouseDown || type == .leftMouseDragged {
+            return didUpdateWindow ? nil : Unmanaged.passUnretained(event)
+        }
+
+        return Unmanaged.passUnretained(event)
+    }
+
+    private func handleWindowShortcutLocked(event: CGEvent) -> Unmanaged<CGEvent>? {
+        guard let shortcut = preferences.windowMaximizeShortcut,
+              event.getIntegerValueField(.keyboardEventAutorepeat) == 0,
+              eventMatches(event, shortcut: shortcut) else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        let point = event.location
+        DispatchQueue.global(qos: .userInteractive).async {
+            GestureTargetController.maximizeWindowUnderPointer(at: point)
+        }
+        return nil
+    }
+
+    private func updateWindowDrag(mode: WindowDragMode, at location: CGPoint) -> Bool {
+        if windowDragSession?.mode != mode {
+            windowDragSession = beginWindowDrag(mode: mode, at: location)
+        }
+
+        guard let session = windowDragSession else {
+            return false
+        }
+
+        let currentPointer = DisplayCoordinateConverter.eventLocationToAccessibilityPoint(location)
+        let dx = currentPointer.x - session.startPointer.x
+        let dy = currentPointer.y - session.startPointer.y
+
+        switch session.mode {
+        case .move:
+            let nextOrigin = CGPoint(
+                x: session.startFrame.origin.x + dx,
+                y: session.startFrame.origin.y + dy
+            )
+            return GestureTargetController.setPosition(nextOrigin, ofWindow: session.window)
+
+        case .resize:
+            let nextFrame = resizedFrame(from: session, dx: dx, dy: dy)
+            return GestureTargetController.setFrame(nextFrame, ofWindow: session.window)
+        }
+    }
+
+    private func beginWindowDrag(mode: WindowDragMode, at location: CGPoint) -> WindowDragSession? {
+        guard let window = GestureTargetController.windowUnderPointer(at: location),
+              let frame = GestureTargetController.frame(ofWindow: window) else {
+            return nil
+        }
+
+        let pointer = DisplayCoordinateConverter.eventLocationToAccessibilityPoint(location)
+        return WindowDragSession(
+            mode: mode,
+            window: window,
+            startPointer: pointer,
+            startFrame: frame,
+            horizontalEdge: pointer.x < frame.midX ? .min : .max,
+            verticalEdge: pointer.y < frame.midY ? .min : .max
+        )
+    }
+
+    private func resizedFrame(from session: WindowDragSession, dx: CGFloat, dy: CGFloat) -> CGRect {
+        let minimumSize = CGSize(width: 160, height: 120)
+        var origin = session.startFrame.origin
+        var size = session.startFrame.size
+
+        switch session.horizontalEdge {
+        case .min:
+            origin.x = session.startFrame.origin.x + dx
+            size.width = session.startFrame.width - dx
+            if size.width < minimumSize.width {
+                origin.x -= minimumSize.width - size.width
+                size.width = minimumSize.width
+            }
+        case .max:
+            size.width = max(minimumSize.width, session.startFrame.width + dx)
+        }
+
+        switch session.verticalEdge {
+        case .min:
+            origin.y = session.startFrame.origin.y + dy
+            size.height = session.startFrame.height - dy
+            if size.height < minimumSize.height {
+                origin.y -= minimumSize.height - size.height
+                size.height = minimumSize.height
+            }
+        case .max:
+            size.height = max(minimumSize.height, session.startFrame.height + dy)
+        }
+
+        return CGRect(origin: origin, size: size)
+    }
+
+    private func windowDragMode(for flags: CGEventFlags) -> WindowDragMode? {
+        let rawValue = ModifierFormatter.normalizedRawValue(from: flags)
+        if preferences.windowResizeModifierFlags != 0,
+           rawValue == preferences.windowResizeModifierFlags {
+            return .resize
+        }
+
+        if preferences.windowMoveModifierFlags != 0,
+           rawValue == preferences.windowMoveModifierFlags {
+            return .move
+        }
+
+        return nil
     }
 
     private func runGesture(
@@ -480,6 +653,7 @@ final class EventTapManager {
         points = []
         displayPoints = []
         frontmostApplicationAtGestureStart = nil
+        windowDragSession = nil
         startPoint = .zero
         lastPoint = .zero
         hideOverlay()
@@ -561,8 +735,27 @@ final class EventTapManager {
         type == .rightMouseDown || type == .rightMouseDragged || type == .rightMouseUp
     }
 
+    private func isWindowControlEvent(_ type: CGEventType) -> Bool {
+        type == .mouseMoved ||
+            type == .leftMouseDown ||
+            type == .leftMouseDragged ||
+            type == .leftMouseUp ||
+            type == .flagsChanged ||
+            type == .keyDown
+    }
+
     private func eventMask(for type: CGEventType) -> CGEventMask {
         CGEventMask(1) << CGEventMask(type.rawValue)
+    }
+
+    private func eventMatches(_ event: CGEvent, shortcut: Shortcut) -> Bool {
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
+        guard keyCode == shortcut.keyCode else {
+            return false
+        }
+
+        let rawValue = ModifierFormatter.normalizedRawValue(from: event.flags)
+        return rawValue == shortcut.modifierFlags
     }
 
     private func distance(_ left: CGPoint, _ right: CGPoint) -> CGFloat {

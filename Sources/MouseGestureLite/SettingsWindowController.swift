@@ -5,10 +5,21 @@ import UniformTypeIdentifiers
 final class SettingsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     private let inputSubsystemEnabled = true
     private let store = GestureStore.shared
+    private let sectionControl = NSSegmentedControl(
+        labels: ["鼠标手势功能", "窗口管理相关功能"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
+    private let gestureContentView = NSStackView()
+    private let windowContentView = NSStackView()
     private let tableView = NSTableView()
     private let nameField = NSTextField()
     private let shortcutRecorder = ShortcutRecorderView()
     private let captureView = GestureCaptureView()
+    private let moveModifierRecorder = ModifierRecorderView()
+    private let resizeModifierRecorder = ModifierRecorderView()
+    private let maximizeShortcutRecorder = ShortcutRecorderView()
     private let sampleCountLabel = NSTextField(labelWithString: "样本：0")
     private let statusLabel = NSTextField(labelWithString: "")
     private let gesturesEnabledCheckbox = NSButton(checkboxWithTitle: "启用手势监听", target: nil, action: nil)
@@ -26,6 +37,10 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let clearSamplesButton = NSButton(title: "清空样本", target: nil, action: nil)
     private let importButton = NSButton(title: "导入配置", target: nil, action: nil)
     private let exportButton = NSButton(title: "导出配置", target: nil, action: nil)
+    private let clearMoveModifierButton = NSButton(title: "清除", target: nil, action: nil)
+    private let clearResizeModifierButton = NSButton(title: "清除", target: nil, action: nil)
+    private let clearMaximizeShortcutButton = NSButton(title: "清除", target: nil, action: nil)
+    private let maximizeNowButton = NSButton(title: "立即最大化光标下窗口", target: nil, action: nil)
     private var preferredSelectionID: UUID?
 
     init() {
@@ -73,13 +88,18 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             root.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
         ])
 
-        root.addArrangedSubview(makePreferenceRow())
-        root.addArrangedSubview(makeMainRow())
+        configureSectionContainers()
+        root.addArrangedSubview(sectionControl)
+        root.addArrangedSubview(gestureContentView)
+        root.addArrangedSubview(windowContentView)
         root.addArrangedSubview(statusLabel)
 
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.font = .systemFont(ofSize: 12)
 
+        sectionControl.selectedSegment = 0
+        sectionControl.target = self
+        sectionControl.action = #selector(switchSettingsSection)
         gesturesEnabledCheckbox.target = self
         gesturesEnabledCheckbox.action = #selector(toggleGesturesEnabled)
         gesturesEnabledCheckbox.isEnabled = inputSubsystemEnabled
@@ -118,6 +138,14 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         importButton.action = #selector(importConfiguration)
         exportButton.target = self
         exportButton.action = #selector(exportConfiguration)
+        clearMoveModifierButton.target = self
+        clearMoveModifierButton.action = #selector(clearMoveModifier)
+        clearResizeModifierButton.target = self
+        clearResizeModifierButton.action = #selector(clearResizeModifier)
+        clearMaximizeShortcutButton.target = self
+        clearMaximizeShortcutButton.action = #selector(clearMaximizeShortcut)
+        maximizeNowButton.target = self
+        maximizeNowButton.action = #selector(maximizeWindowUnderPointerNow)
         configureControlAppearance()
 
         nameField.delegate = self
@@ -129,6 +157,21 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         captureView.onStrokeFinished = { [weak self] points in
             self?.appendTemplate(points)
         }
+        moveModifierRecorder.onModifierFlagsChanged = { [weak self] rawValue in
+            self?.store.updatePreferences { preferences in
+                preferences.windowMoveModifierFlags = rawValue
+            }
+        }
+        resizeModifierRecorder.onModifierFlagsChanged = { [weak self] rawValue in
+            self?.store.updatePreferences { preferences in
+                preferences.windowResizeModifierFlags = rawValue
+            }
+        }
+        maximizeShortcutRecorder.onShortcutChanged = { [weak self] shortcut in
+            self?.store.updatePreferences { preferences in
+                preferences.windowMaximizeShortcut = shortcut
+            }
+        }
 
         NotificationCenter.default.addObserver(
             self,
@@ -138,6 +181,18 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         )
 
         reload()
+    }
+
+    private func configureSectionContainers() {
+        gestureContentView.orientation = .vertical
+        gestureContentView.spacing = 18
+        gestureContentView.addArrangedSubview(makePreferenceRow())
+        gestureContentView.addArrangedSubview(makeMainRow())
+
+        windowContentView.orientation = .vertical
+        windowContentView.spacing = 18
+        windowContentView.addArrangedSubview(makeWindowManagementContent())
+        windowContentView.isHidden = true
     }
 
     private func makePreferenceRow() -> NSView {
@@ -226,6 +281,91 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             editorPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 520)
         ])
 
+        return row
+    }
+
+    private func makeWindowManagementContent() -> NSView {
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 18
+
+        let description = NSTextField(labelWithString: "窗口操作默认作用于鼠标光标下方的窗口，即使该窗口不是当前前台窗口。")
+        description.textColor = .secondaryLabelColor
+        description.font = .systemFont(ofSize: 12)
+        description.maximumNumberOfLines = 2
+
+        let moveResizeStack = NSStackView()
+        moveResizeStack.orientation = .vertical
+        moveResizeStack.alignment = .leading
+        moveResizeStack.spacing = 10
+        moveResizeStack.addArrangedSubview(description)
+        moveResizeStack.addArrangedSubview(makeModifierRow(title: "移动窗口修饰键", recorder: moveModifierRecorder, clearButton: clearMoveModifierButton))
+        moveResizeStack.addArrangedSubview(makeModifierRow(title: "缩放窗口修饰键", recorder: resizeModifierRecorder, clearButton: clearResizeModifierButton))
+
+        let hint = NSTextField(labelWithString: "按住已设置的修饰键并移动鼠标：移动窗口；按住缩放修饰键并移动鼠标：按光标所在边角缩放窗口。")
+        hint.textColor = .secondaryLabelColor
+        hint.font = .systemFont(ofSize: 12)
+        hint.maximumNumberOfLines = 2
+        moveResizeStack.addArrangedSubview(hint)
+
+        let maximizeStack = NSStackView()
+        maximizeStack.orientation = .vertical
+        maximizeStack.alignment = .leading
+        maximizeStack.spacing = 10
+        maximizeStack.addArrangedSubview(makeShortcutRow(title: "最大化光标下窗口", recorder: maximizeShortcutRecorder, clearButton: clearMaximizeShortcutButton))
+        maximizeStack.addArrangedSubview(maximizeNowButton)
+
+        let moveResizeSection = makeSection(title: "移动和缩放", content: moveResizeStack)
+        let maximizeSection = makeSection(title: "窗口管理", content: maximizeStack)
+
+        stack.addArrangedSubview(moveResizeSection)
+        stack.addArrangedSubview(maximizeSection)
+        stack.addArrangedSubview(NSView())
+
+        NSLayoutConstraint.activate([
+            moveResizeSection.widthAnchor.constraint(greaterThanOrEqualToConstant: 620),
+            maximizeSection.widthAnchor.constraint(greaterThanOrEqualToConstant: 620),
+            moveModifierRecorder.widthAnchor.constraint(equalToConstant: 240),
+            resizeModifierRecorder.widthAnchor.constraint(equalToConstant: 240),
+            maximizeShortcutRecorder.widthAnchor.constraint(equalToConstant: 240),
+            moveModifierRecorder.heightAnchor.constraint(equalToConstant: 38),
+            resizeModifierRecorder.heightAnchor.constraint(equalToConstant: 38),
+            maximizeShortcutRecorder.heightAnchor.constraint(equalToConstant: 38)
+        ])
+
+        return stack
+    }
+
+    private func makeModifierRow(title: String, recorder: ModifierRecorderView, clearButton: NSButton) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.widthAnchor.constraint(equalToConstant: 130).isActive = true
+
+        row.addArrangedSubview(label)
+        row.addArrangedSubview(recorder)
+        row.addArrangedSubview(clearButton)
+        return row
+    }
+
+    private func makeShortcutRow(title: String, recorder: ShortcutRecorderView, clearButton: NSButton) -> NSView {
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.widthAnchor.constraint(equalToConstant: 130).isActive = true
+
+        row.addArrangedSubview(label)
+        row.addArrangedSubview(recorder)
+        row.addArrangedSubview(clearButton)
         return row
     }
 
@@ -381,7 +521,19 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     }
 
     private func configureControlAppearance() {
-        for button in [saveButton, deleteButton, addButton, undoSampleButton, clearSamplesButton, importButton, exportButton] {
+        for button in [
+            saveButton,
+            deleteButton,
+            addButton,
+            undoSampleButton,
+            clearSamplesButton,
+            importButton,
+            exportButton,
+            clearMoveModifierButton,
+            clearResizeModifierButton,
+            clearMaximizeShortcutButton,
+            maximizeNowButton
+        ] {
             button.bezelStyle = .rounded
         }
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "新增")
@@ -399,6 +551,9 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         updateGestureTimeoutControls()
         targetUnderPointerRadio.state = store.preferences.gestureTargetPolicy == .windowUnderPointer ? .on : .off
         targetActiveWindowRadio.state = store.preferences.gestureTargetPolicy == .activeWindow ? .on : .off
+        moveModifierRecorder.modifierFlagsRawValue = store.preferences.windowMoveModifierFlags
+        resizeModifierRecorder.modifierFlagsRawValue = store.preferences.windowResizeModifierFlags
+        maximizeShortcutRecorder.shortcut = store.preferences.windowMaximizeShortcut
         loginItemCheckbox.state = LoginItemManager.isEnabled ? .on : .off
         statusLabel.stringValue = PermissionManager.isAccessibilityTrusted
             ? "辅助功能权限已开启。"
@@ -533,6 +688,37 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func selectActiveWindowTarget() {
         store.updatePreferences { preferences in
             preferences.gestureTargetPolicy = .activeWindow
+        }
+    }
+
+    @objc private func switchSettingsSection() {
+        let showingWindows = sectionControl.selectedSegment == 1
+        gestureContentView.isHidden = showingWindows
+        windowContentView.isHidden = !showingWindows
+    }
+
+    @objc private func clearMoveModifier() {
+        store.updatePreferences { preferences in
+            preferences.windowMoveModifierFlags = 0
+        }
+    }
+
+    @objc private func clearResizeModifier() {
+        store.updatePreferences { preferences in
+            preferences.windowResizeModifierFlags = 0
+        }
+    }
+
+    @objc private func clearMaximizeShortcut() {
+        store.updatePreferences { preferences in
+            preferences.windowMaximizeShortcut = nil
+        }
+    }
+
+    @objc private func maximizeWindowUnderPointerNow() {
+        let point = CGEvent(source: nil)?.location ?? .zero
+        DispatchQueue.global(qos: .userInteractive).async {
+            GestureTargetController.maximizeWindowUnderPointer(at: point)
         }
     }
 

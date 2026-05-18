@@ -15,6 +15,19 @@ enum DisplayCoordinateConverter {
         eventLocationToTopLeftDesktopPoint(point)
     }
 
+    static func visibleAccessibilityFrame(containingEventLocation point: CGPoint) -> CGRect {
+        let accessibilityPoint = eventLocationToAccessibilityPoint(point)
+        let screenFrames = NSScreen.screens.map { screen in
+            accessibilityRect(fromAppKitRect: screen.visibleFrame)
+        }
+
+        if let frame = screenFrames.first(where: { $0.contains(accessibilityPoint) }) {
+            return frame
+        }
+
+        return screenFrames.first ?? .zero
+    }
+
     private static func eventLocationToTopLeftDesktopPoint(_ point: CGPoint) -> CGPoint {
         let desktopFrame = desktopFrame()
         guard !desktopFrame.isEmpty else {
@@ -24,6 +37,20 @@ enum DisplayCoordinateConverter {
         return CGPoint(
             x: desktopFrame.minX + point.x,
             y: desktopFrame.maxY - point.y
+        )
+    }
+
+    private static func accessibilityRect(fromAppKitRect rect: CGRect) -> CGRect {
+        let desktopFrame = desktopFrame()
+        guard !desktopFrame.isEmpty else {
+            return rect
+        }
+
+        return CGRect(
+            x: rect.minX,
+            y: desktopFrame.maxY - rect.maxY,
+            width: rect.width,
+            height: rect.height
         )
     }
 

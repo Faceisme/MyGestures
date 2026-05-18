@@ -86,6 +86,35 @@ enum GestureTargetController {
         }
     }
 
+    static func windowUnderPointer(at point: CGPoint) -> AXUIElement? {
+        executionTarget(
+            at: point,
+            policy: .windowUnderPointer,
+            frontmostApplicationAtGestureStart: nil
+        ).window
+    }
+
+    static func frame(ofWindow window: AXUIElement) -> CGRect? {
+        frame(of: window)
+    }
+
+    static func setFrame(_ frame: CGRect, ofWindow window: AXUIElement) -> Bool {
+        setPosition(frame.origin, ofWindow: window) && setSize(frame.size, ofWindow: window)
+    }
+
+    static func maximizeWindowUnderPointer(at point: CGPoint) {
+        guard let window = windowUnderPointer(at: point) else {
+            return
+        }
+
+        let frame = DisplayCoordinateConverter.visibleAccessibilityFrame(containingEventLocation: point)
+        guard !frame.isEmpty else {
+            return
+        }
+
+        _ = setFrame(frame, ofWindow: window)
+    }
+
     private static func targetUnderPointer(at point: CGPoint) -> GestureExecutionTarget {
         let candidatePoints = targetLookupPoints(for: point)
         guard let element = firstElementAtPosition(candidatePoints) else {
@@ -293,6 +322,22 @@ enum GestureTargetController {
         }
 
         return CGRect(origin: position, size: size)
+    }
+
+    static func setPosition(_ position: CGPoint, ofWindow window: AXUIElement) -> Bool {
+        var position = position
+        guard let value = AXValueCreate(.cgPoint, &position) else {
+            return false
+        }
+        return AXUIElementSetAttributeValue(window, kAXPositionAttribute as CFString, value) == .success
+    }
+
+    static func setSize(_ size: CGSize, ofWindow window: AXUIElement) -> Bool {
+        var size = size
+        guard let value = AXValueCreate(.cgSize, &size) else {
+            return false
+        }
+        return AXUIElementSetAttributeValue(window, kAXSizeAttribute as CFString, value) == .success
     }
 
     private static func frameFromMultipleAttributes(of window: AXUIElement) -> CGRect? {

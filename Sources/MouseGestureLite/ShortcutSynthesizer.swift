@@ -3,6 +3,8 @@ import CoreGraphics
 import Foundation
 
 enum ShortcutSynthesizer {
+    static let syntheticEventMarker: Int64 = 0x4D47534B4559
+
     static func send(_ shortcut: Shortcut) {
         sendKey(keyCode: shortcut.keyCode, modifierFlags: shortcut.modifierFlags)
     }
@@ -25,9 +27,11 @@ enum ShortcutSynthesizer {
 
         let keyDown = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true)
         keyDown?.flags = flags
+        keyDown?.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
 
         let keyUp = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false)
         keyUp?.flags = flags
+        keyUp?.setIntegerValueField(.eventSourceUserData, value: syntheticEventMarker)
 
         if let pid {
             if let keyDown {

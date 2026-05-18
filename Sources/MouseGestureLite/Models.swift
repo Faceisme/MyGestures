@@ -57,6 +57,9 @@ struct AppPreferences: Codable, Equatable {
     var recognitionThreshold: Double
     var gestureTimeoutSeconds: Double
     var gestureTargetPolicy: GestureTargetPolicy
+    var windowMoveModifierFlags: UInt64
+    var windowResizeModifierFlags: UInt64
+    var windowMaximizeShortcut: Shortcut?
 
     init(
         gesturesEnabled: Bool,
@@ -64,7 +67,10 @@ struct AppPreferences: Codable, Equatable {
         showMenuBarIcon: Bool,
         recognitionThreshold: Double,
         gestureTimeoutSeconds: Double,
-        gestureTargetPolicy: GestureTargetPolicy
+        gestureTargetPolicy: GestureTargetPolicy,
+        windowMoveModifierFlags: UInt64,
+        windowResizeModifierFlags: UInt64,
+        windowMaximizeShortcut: Shortcut?
     ) {
         self.gesturesEnabled = gesturesEnabled
         self.showTrail = showTrail
@@ -72,6 +78,9 @@ struct AppPreferences: Codable, Equatable {
         self.recognitionThreshold = recognitionThreshold
         self.gestureTimeoutSeconds = gestureTimeoutSeconds
         self.gestureTargetPolicy = gestureTargetPolicy
+        self.windowMoveModifierFlags = windowMoveModifierFlags
+        self.windowResizeModifierFlags = windowResizeModifierFlags
+        self.windowMaximizeShortcut = windowMaximizeShortcut
     }
 
     init(from decoder: Decoder) throws {
@@ -82,6 +91,9 @@ struct AppPreferences: Codable, Equatable {
         recognitionThreshold = try container.decodeIfPresent(Double.self, forKey: .recognitionThreshold) ?? Self.defaults.recognitionThreshold
         gestureTimeoutSeconds = try container.decodeIfPresent(Double.self, forKey: .gestureTimeoutSeconds) ?? Self.defaults.gestureTimeoutSeconds
         gestureTargetPolicy = try container.decodeIfPresent(GestureTargetPolicy.self, forKey: .gestureTargetPolicy) ?? Self.defaults.gestureTargetPolicy
+        windowMoveModifierFlags = try container.decodeIfPresent(UInt64.self, forKey: .windowMoveModifierFlags) ?? Self.defaults.windowMoveModifierFlags
+        windowResizeModifierFlags = try container.decodeIfPresent(UInt64.self, forKey: .windowResizeModifierFlags) ?? Self.defaults.windowResizeModifierFlags
+        windowMaximizeShortcut = try container.decodeIfPresent(Shortcut.self, forKey: .windowMaximizeShortcut) ?? Self.defaults.windowMaximizeShortcut
     }
 
     static let defaults = AppPreferences(
@@ -90,7 +102,10 @@ struct AppPreferences: Codable, Equatable {
         showMenuBarIcon: true,
         recognitionThreshold: 0.34,
         gestureTimeoutSeconds: 3.0,
-        gestureTargetPolicy: .windowUnderPointer
+        gestureTargetPolicy: .windowUnderPointer,
+        windowMoveModifierFlags: 0,
+        windowResizeModifierFlags: 0,
+        windowMaximizeShortcut: nil
     )
 }
 

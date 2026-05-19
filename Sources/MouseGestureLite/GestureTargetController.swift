@@ -126,8 +126,16 @@ enum GestureTargetController {
         }
 
         let window = windowElement(containing: element)
+        if window == nil, let candidate = windowCandidate(atAny: candidatePoints) {
+            return target(from: candidate)
+        }
+
         let pid = window.flatMap(processIdentifier(for:)) ?? processIdentifier(for: element)
         guard let pid else {
+            if let candidate = windowCandidate(atAny: candidatePoints) {
+                return target(from: candidate)
+            }
+
             return GestureExecutionTarget(
                 policy: .windowUnderPointer,
                 pid: nil,
@@ -426,6 +434,11 @@ enum GestureTargetController {
 
         if let window = axElementAttribute(kAXWindowAttribute, of: element) {
             return window
+        }
+
+        if let topLevel = axElementAttribute(kAXTopLevelUIElementAttribute, of: element),
+           role(of: topLevel) == kAXWindowRole {
+            return topLevel
         }
 
         var current: AXUIElement? = element

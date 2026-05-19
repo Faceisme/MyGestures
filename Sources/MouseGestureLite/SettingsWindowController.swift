@@ -40,7 +40,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     private let clearMoveModifierButton = NSButton(title: "清除", target: nil, action: nil)
     private let clearResizeModifierButton = NSButton(title: "清除", target: nil, action: nil)
     private let clearMaximizeShortcutButton = NSButton(title: "清除", target: nil, action: nil)
-    private let maximizeNowButton = NSButton(title: "立即最大化光标下窗口", target: nil, action: nil)
     private var preferredSelectionID: UUID?
 
     init() {
@@ -144,8 +143,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         clearResizeModifierButton.action = #selector(clearResizeModifier)
         clearMaximizeShortcutButton.target = self
         clearMaximizeShortcutButton.action = #selector(clearMaximizeShortcut)
-        maximizeNowButton.target = self
-        maximizeNowButton.action = #selector(maximizeWindowUnderPointerNow)
         configureControlAppearance()
 
         nameField.delegate = self
@@ -314,7 +311,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
         maximizeStack.alignment = .leading
         maximizeStack.spacing = 10
         maximizeStack.addArrangedSubview(makeShortcutRow(title: "最大化光标下窗口", recorder: maximizeShortcutRecorder, clearButton: clearMaximizeShortcutButton))
-        maximizeStack.addArrangedSubview(maximizeNowButton)
 
         let moveResizeSection = makeSection(title: "移动和缩放", content: moveResizeStack)
         let maximizeSection = makeSection(title: "窗口管理", content: maximizeStack)
@@ -531,8 +527,7 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
             exportButton,
             clearMoveModifierButton,
             clearResizeModifierButton,
-            clearMaximizeShortcutButton,
-            maximizeNowButton
+            clearMaximizeShortcutButton
         ] {
             button.bezelStyle = .rounded
         }
@@ -712,13 +707,6 @@ final class SettingsWindowController: NSWindowController, NSTableViewDataSource,
     @objc private func clearMaximizeShortcut() {
         store.updatePreferences { preferences in
             preferences.windowMaximizeShortcut = nil
-        }
-    }
-
-    @objc private func maximizeWindowUnderPointerNow() {
-        let point = CGEvent(source: nil)?.location ?? .zero
-        DispatchQueue.global(qos: .userInteractive).async {
-            GestureTargetController.maximizeWindowUnderPointer(at: point)
         }
     }
 
